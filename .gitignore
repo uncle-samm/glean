@@ -2,3 +2,6 @@
 *.ez
 /build
 erl_crash.dump
+/reference
+.env
+.hex_api_key

@@ -1,0 +1,166 @@
+import gleam/list
+import glean/agent
+import glean/error
+import glean/run
+import glean/schema
+import glean/tool
+import glean/testing/provider.{ScriptedToolCall, TextResponse, ToolCallResponse}
+import gleeunit/should
+
+pub fn simple_text_generation_test() {
+  let p = provider.test_provider([TextResponse("Hello, world!")])
+  let a = agent.new(p)
+
+  case run.generate(a, Nil, "Hi") {
+    Ok(result) -> {
+      result.text |> should.equal("Hello, world!")
+      result.steps |> should.equal(1)
+    }
+    Error(_) -> panic as "Expected Ok"
+  }
+}
+
+pub fn tool_calling_loop_test() {
+  // Step 0: provider calls a tool
+  // Step 1: provider responds with text after seeing tool result
+  let p =
+    provider.test_provider([
+      ToolCallResponse([
+        ScriptedToolCall(id: "c1", name: "add", arguments: "{\"a\":2,\"b\":3}"),
+      ]),
+      TextResponse("The answer is 5"),
+    ])
+
+  let add_tool =
+    tool.new(
+      name: "add",
+      description: "Add two numbers",
+      input_schema: schema.object(
+        properties: [#("a", schema.int()), #("b", schema.int())],
+        required: ["a", "b"],
+      ),
+      execute: fn(_ctx, _args) { Ok("5") },
+    )
+
+  let a =
+    agent.new(p)
+    |> agent.tools(tool.toolset([add_tool]))
+
+  case run.generate(a, Nil, "What is 2 + 3?") {
+    Ok(result) -> {
+      result.text |> should.equal("The answer is 5")
+      result.steps |> should.equal(2)
+      // Should have step results for both steps
+      list.length(result.step_results) |> should.equal(2)
+    }
+    Error(_) -> panic as "Expected Ok"
+  }
+}
+
+pub fn max_steps_exceeded_test() {
+  // Provider always returns tool calls — should hit max steps
+  let p =
+    provider.test_provider([
+      ToolCallResponse([
+        ScriptedToolCall(id: "c1", name: "loop", arguments: "{}"),
+      ]),
+    ])
+
+  let loop_tool =
+    tool.new(
+      name: "loop",
+      description: "Loops forever",
+      input_schema: schema.object(properties: [#("x", schema.string())], required: []),
+      execute: fn(_ctx, _args) { Ok("looping") },
+    )
+
+  let a =
+    agent.new(p)
+    |> agent.tools(tool.toolset([loop_tool]))
+    |> agent.max_steps(3)
+
+  case run.generate(a, Nil, "Loop") {
+    Ok(_) -> panic as "Expected error"
+    Error(err) ->
+      case err {
+        error.MaxStepsExceeded(max_steps, _) ->
+          max_steps |> should.equal(3)
+        _ -> panic as "Expected MaxStepsExceeded"
+      }
+  }
+}
+
+pub fn system_prompt_included_test() {
+  let p = provider.test_provider([TextResponse("I am helpful")])
+
+  let a =
+    agent.new(p)
+    |> agent.system("You are a helpful assistant")
+
+  case run.generate(a, Nil, "Who are you?") {
+    Ok(result) -> {
+      result.text |> should.equal("I am helpful")
+      // Messages should include system prompt + user message
+      let assert True = list.length(result.messages) >= 2
+    }
+    Error(_) -> panic as "Expected Ok"
+  }
+}
+
+pub fn provider_error_propagated_test() {
+  let p =
+    provider.test_provider([
+      provider.ErrorResponse(error.ProviderError(
+        provider: "test",
+        model: "test-model",
+        status: 500,
+        message: "Internal server error",
+      )),
+    ])
+
+  let a = agent.new(p)
+
+  case run.generate(a, Nil, "Hello") {
+    Ok(_) -> panic as "Expected error"
+    Error(err) ->
+      case err {
+        error.ProviderError(_, _, status, _) ->
+          status |> should.equal(500)
+        _ -> panic as "Expected ProviderError"
+      }
+  }
+}
+
+pub fn dependency_injection_test() {
+  // Test that deps are threaded through to tool execution
+  let p =
+    provider.test_provider([
+      ToolCallResponse([
+        ScriptedToolCall(id: "c1", name: "greet", arguments: "{}"),
+      ]),
+      TextResponse("Done"),
+    ])
+
+  let greet_tool =
+    tool.new(
+      name: "greet",
+      description: "Greet with prefix",
+      input_schema: schema.object(properties: [#("x", schema.string())], required: []),
+      execute: fn(ctx, _args) {
+        // ctx.deps should be our injected string
+        Ok("Hello from " <> ctx.deps)
+      },
+    )
+
+  let a =
+    agent.new(p)
+    |> agent.tools(tool.toolset([greet_tool]))
+
+  case run.generate(a, "world", "Greet me") {
+    Ok(result) -> {
+      result.text |> should.equal("Done")
+      result.steps |> should.equal(2)
+    }
+    Error(_) -> panic as "Expected Ok"
+  }
+}
