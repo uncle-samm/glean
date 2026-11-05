@@ -430,6 +430,21 @@ glean/
     simulation.gleam      Deterministic simulation engine
 ```
 
+## Performance
+
+Network time dominates real agent runs; glean's own work is small. Numbers from `gleam run -m glean_bench` on a GitHub Actions runner (OTP 29):
+
+| Benchmark | Mean |
+|---|---|
+| Encode a 100-message request (OpenAI / Anthropic) | 38 µs / 84 µs |
+| Encode a 1000-message request (OpenAI / Anthropic) | 0.5 ms / 1.1 ms |
+| Decode a 10 KB OpenAI response | 30 µs |
+| Validate a 500-item array against a schema | 1.2 ms |
+| Process 1000 streamed SSE chunks | 5.6 ms |
+| 10-step tool loop with the test provider | 35 µs |
+
+The benchmarks run in CI on every push.
+
 ## Target
 
 Glean runs on the **BEAM** (Erlang VM) only. JavaScript is not supported — the framework depends on `gleam_httpc`, `gleam_erlang`, and `gleam_otp` for HTTP, process management, and SSE streaming.

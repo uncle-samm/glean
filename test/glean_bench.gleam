@@ -76,6 +76,9 @@ pub fn main() -> Nil {
   })
 
   let loop_agent = tool_loop_agent(10)
+  // Check once that the benchmark measures a real 10-step run.
+  let assert Ok(check) = run.generate(loop_agent, Nil, "go")
+  let assert 10 = check.steps
   bench("10-step tool loop (test provider)", 50, fn() {
     let _ = run.generate(loop_agent, Nil, "go")
     Nil
