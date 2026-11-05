@@ -63,10 +63,9 @@ pub fn main() -> Nil {
 
   bench("stream loop over 1000 chunks", 20, fn() {
     let events =
-      list.append(
-        list.map(numbers(1, 1000), fn(_) { sse.Event(None, chunk) }),
-        [sse.Event(None, "[DONE]")],
-      )
+      list.append(list.map(numbers(1, 1000), fn(_) { sse.Event(None, chunk) }), [
+        sse.Event(None, "[DONE]"),
+      ])
     let _ =
       openai_compatible.stream_loop(
         sse.from_events(events),

@@ -8,9 +8,10 @@ import gleeunit/should
 
 pub fn parses_complete_events_and_keeps_the_rest_test() {
   sse.parse_events("data: one\n\nevent: ping\ndata: two\n\ndata: thr")
-  |> should.equal(
-    #([sse.Event(None, "one"), sse.Event(Some("ping"), "two")], "data: thr"),
-  )
+  |> should.equal(#(
+    [sse.Event(None, "one"), sse.Event(Some("ping"), "two")],
+    "data: thr",
+  ))
 }
 
 pub fn multi_line_data_and_crlf_test() {
@@ -34,7 +35,6 @@ pub fn scripted_stream_delivers_then_times_out_test() {
 
 @external(erlang, "glean_test_http_server", "serve")
 fn serve(responses: List(String)) -> Int
-
 
 fn url(port: Int) -> String {
   "http://127.0.0.1:" <> int.to_string(port) <> "/stream"
@@ -72,7 +72,9 @@ fn collect(stream: sse.Stream, acc: List(sse.SseEvent)) -> List(sse.SseEvent) {
 pub fn streams_events_split_across_chunks_test() {
   // The second event and a multi-byte character are split across chunks.
   let port =
-    serve([chunked(["data: one\n\nda", "ta: h\u{e9}", "llo\n\n", "data: [DONE]\n\n"])])
+    serve([
+      chunked(["data: one\n\nda", "ta: h\u{e9}", "llo\n\n", "data: [DONE]\n\n"]),
+    ])
   sse.start(test_config(), url(port), [], "{}")
   |> collect([])
   |> should.equal([

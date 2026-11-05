@@ -45,7 +45,7 @@ type Message {
   Chunk(BitArray)
   Finished
   Status(Int, Option(String), BitArray)
-  Failed(String)
+  RequestFailed(String)
   TimedOut
 }
 
@@ -107,7 +107,7 @@ fn start_attempt(
             True -> retry(retry_after)
             False -> from_events([HttpStatus(status, to_text(response_body))])
           }
-        Failed(reason) ->
+        RequestFailed(reason) ->
           case can_retry {
             True -> retry(None)
             False -> from_events([Failed(reason)])
@@ -127,7 +127,10 @@ pub fn from_events(events: List(SseEvent)) -> Stream {
 
 /// Wait up to `timeout_ms` for the next event. `Error(Nil)` means nothing
 /// arrived in time; the request is cancelled.
-pub fn next(stream: Stream, timeout_ms: Int) -> Result(#(SseEvent, Stream), Nil) {
+pub fn next(
+  stream: Stream,
+  timeout_ms: Int,
+) -> Result(#(SseEvent, Stream), Nil) {
   case stream.pending, stream.request {
     [event, ..rest], _ -> Ok(#(event, Stream(..stream, pending: rest)))
     [], None -> Error(Nil)
@@ -142,15 +145,20 @@ pub fn next(stream: Stream, timeout_ms: Int) -> Result(#(SseEvent, Stream), Nil)
             _ ->
               case bit_array.to_string(stream.buffer) {
                 // A final event without a trailing blank line still counts.
-                Ok(text) -> list.append(parse_events(text <> "\n\n").0, [Closed])
+                Ok(text) ->
+                  list.append(parse_events(text <> "\n\n").0, [Closed])
                 Error(_) -> [Failed("Response is not valid UTF-8")]
               }
           }
-          next(Stream(..stream, buffer: <<>>, pending: rest, done: True), timeout_ms)
+          next(
+            Stream(..stream, buffer: <<>>, pending: rest, done: True),
+            timeout_ms,
+          )
         }
         Status(status, _, body) ->
           Ok(#(HttpStatus(status, to_text(body)), Stream(..stream, done: True)))
-        Failed(reason) -> Ok(#(Failed(reason), Stream(..stream, done: True)))
+        RequestFailed(reason) ->
+          Ok(#(Failed(reason), Stream(..stream, done: True)))
         TimedOut -> {
           ffi_cancel(request)
           Error(Nil)

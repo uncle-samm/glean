@@ -38,14 +38,24 @@ next(RequestId, TimeoutMs) ->
         {http, {RequestId, stream_end, _Headers}} -> finished;
         {http, {RequestId, {{_Version, Status, _Reason}, RespHeaders, RespBody}}} ->
             {status, Status, retry_after(RespHeaders), to_binary(RespBody)};
-        {http, {RequestId, {error, Reason}}} -> {failed, describe(Reason)}
+        {http, {RequestId, {error, Reason}}} -> {request_failed, describe(Reason)}
     after TimeoutMs ->
         timed_out
     end.
 
+%% Cancel the request and drop any of its messages already in the mailbox,
+%% so a stopped stream leaves nothing behind for the calling process.
 cancel(RequestId) ->
     _ = httpc:cancel_request(RequestId),
-    nil.
+    flush(RequestId).
+
+flush(RequestId) ->
+    receive
+        {http, {RequestId, _}} -> flush(RequestId);
+        {http, {RequestId, _, _}} -> flush(RequestId)
+    after 0 ->
+        nil
+    end.
 
 ssl_options() ->
     [

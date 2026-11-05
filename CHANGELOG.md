@@ -46,7 +46,6 @@ names; the compiler points at each one.
 - Token usage in OpenAI-compatible streams (`stream_options.include_usage`).
 - Retries with jitter, `Retry-After` support, and retries for failed
   connections, 408 and 409.
-- Multi-turn streaming: `run.stream_messages` and `run.continue_stream`.
 - Streaming errors keep the HTTP status and body (a bad key is a 401,
   not "stream closed early"), and streaming requests are retried like
   normal ones before the first event arrives.

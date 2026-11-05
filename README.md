@@ -457,7 +457,7 @@ Glean runs on the **BEAM** (Erlang VM) only. JavaScript is not supported — the
 
 ### FFI
 
-There is one FFI module, `src/glean_http_stream_ffi.erl` (about 60 lines). `gleam_httpc` only returns whole responses, so streaming responses use OTP `httpc`'s stream mode directly: the FFI starts the request (with TLS certificate and hostname verification), and hands each body chunk, the HTTP status of an error response, or a connection failure to Gleam. Everything else, including SSE parsing (`glean/providers/sse`), is Gleam. JSON never goes through FFI.
+There is one FFI module, `src/glean_http_stream_ffi.erl` (about 80 lines). `gleam_httpc` only returns whole responses, so streaming responses use OTP `httpc`'s stream mode directly: the FFI starts the request (with TLS certificate and hostname verification), and hands each body chunk, the HTTP status of an error response, or a connection failure to Gleam. Everything else, including SSE parsing (`glean/providers/sse`), is Gleam. JSON never goes through FFI.
 
 ## Development
 

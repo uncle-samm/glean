@@ -43,9 +43,13 @@ pub fn close_after_finish_reason_completes_stream_test() {
 
 pub fn http_status_is_reported_test() {
   case run_events([sse.HttpStatus(401, "{\"error\":\"bad key\"}")]) {
-    Error(error.ProviderError(status: 401, message: "{\"error\":\"bad key\"}", ..)) ->
-      Nil
-    other -> panic as { "Expected a 401 ProviderError, got " <> string_of(other) }
+    Error(error.ProviderError(
+      status: 401,
+      message: "{\"error\":\"bad key\"}",
+      ..,
+    )) -> Nil
+    other ->
+      panic as { "Expected a 401 ProviderError, got " <> string_of(other) }
   }
 }
 
