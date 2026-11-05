@@ -1,7 +1,7 @@
 /// Agent configuration (builder pattern).
 /// Immutable config — running an agent produces a RunResult; the agent is reusable.
-import glean/model.{type Model}
 import gleam/option.{type Option}
+import glean/model.{type Model}
 import glean/provider.{
   type ModelSettings, type Provider, type ResponseFormat, type ToolChoice,
 }

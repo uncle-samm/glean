@@ -7,9 +7,10 @@
 ////
 //// For older Claude models that still take sampling parameters, see
 //// `glean/models/anthropic_sampling`.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
-import glean/provider.{type ModelSettings, ModelSettings, type ReasoningEffort}
+import glean/provider.{type ModelSettings, type ReasoningEffort, ModelSettings}
 import glean/providers/anthropic as anthropic_provider
 import glean/providers/config.{type ProviderConfig}
 
@@ -97,12 +98,18 @@ pub fn max_output_tokens(m: Claude, n: Int) -> Claude {
 
 /// Stop generating when the model writes any of these strings.
 pub fn stop_sequences(m: Claude, stops: List(String)) -> Claude {
-  Claude(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
+  Claude(
+    ..m,
+    settings: ModelSettings(..m.settings, stop_sequences: Some(stops)),
+  )
 }
 
 /// Set how much the model should think before answering.
 pub fn reasoning_effort(m: Claude, effort: ReasoningEffort) -> Claude {
-  Claude(..m, settings: ModelSettings(..m.settings, reasoning_effort: Some(effort)))
+  Claude(
+    ..m,
+    settings: ModelSettings(..m.settings, reasoning_effort: Some(effort)),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +118,10 @@ pub fn reasoning_effort(m: Claude, effort: ReasoningEffort) -> Claude {
 
 /// Build a `Model` to use with `agent.new`.
 pub fn build(m: Claude) -> Model {
-  Model(provider: anthropic_provider.from_config(m.config), settings: m.settings)
+  Model(
+    provider: anthropic_provider.from_config(m.config),
+    settings: m.settings,
+  )
 }
 
 fn new(key: String, model_id: String) -> Claude {

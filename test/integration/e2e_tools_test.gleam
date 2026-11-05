@@ -204,7 +204,10 @@ fn get_current_info_tool() -> tool.Tool(Nil) {
 // ---------------------------------------------------------------------------
 
 fn test_settings() -> provider.ModelSettings {
-  provider.ModelSettings(..provider.default_settings(), max_output_tokens: Some(1500))
+  provider.ModelSettings(
+    ..provider.default_settings(),
+    max_output_tokens: Some(1500),
+  )
 }
 
 // ---------------------------------------------------------------------------

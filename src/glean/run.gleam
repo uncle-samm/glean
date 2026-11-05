@@ -147,7 +147,8 @@ fn prepend_system_prompts(
     })
   case has_system {
     True -> messages
-    False -> list.append(list.map(agent.system_prompts, message.system), messages)
+    False ->
+      list.append(list.map(agent.system_prompts, message.system), messages)
   }
 }
 
@@ -284,7 +285,10 @@ fn advance(
 
 /// When the agent asked for JSON with a schema, the final answer must parse
 /// and match it.
-fn validate_output(agent: Agent(deps), text: String) -> Result(Nil, GleanError) {
+fn validate_output(
+  agent: Agent(deps),
+  text: String,
+) -> Result(Nil, GleanError) {
   case agent.response_format {
     provider.JsonFormat(schema: Some(output_schema), ..) ->
       case schema.validate_json(output_schema, text) {
@@ -360,7 +364,9 @@ type PendingToolCall {
   )
 }
 
-fn extract_tool_calls(content: List(GeneratedContent)) -> List(PendingToolCall) {
+fn extract_tool_calls(
+  content: List(GeneratedContent),
+) -> List(PendingToolCall) {
   list.filter_map(content, fn(c) {
     case c {
       GeneratedToolCall(id, name, args) ->

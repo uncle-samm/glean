@@ -576,7 +576,12 @@ fn encode_model_part(
     message.AssistantText(text) ->
       Ok(json.object([#("text", json.string(text))]))
     message.AssistantReasoning(text, _) ->
-      Ok(json.object([#("text", json.string(text)), #("thought", json.bool(True))]))
+      Ok(
+        json.object([
+          #("text", json.string(text)),
+          #("thought", json.bool(True)),
+        ]),
+      )
     message.AssistantRedactedReasoning(_) -> Error(Nil)
     message.AssistantToolCall(id, name, args_json) -> {
       let args = json_value.arguments_to_object(args_json)
@@ -739,7 +744,9 @@ fn part_decoder() -> decode.Decoder(Option(GeneratedContent)) {
       use thought <- decode.optional_field("thought", False, decode.bool)
       case text, thought {
         Some(t), True ->
-          decode.success(Some(provider.GeneratedReasoning(text: t, signature: None)))
+          decode.success(
+            Some(provider.GeneratedReasoning(text: t, signature: None)),
+          )
         Some(t), False -> decode.success(Some(GeneratedText(text: t)))
         None, _ -> decode.success(None)
       }

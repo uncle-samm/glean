@@ -102,7 +102,10 @@ pub fn empty_object_schema_test() {
 fn person() {
   schema.object(
     properties: [
-      #("name", schema.string_with_length(min_length: Some(1), max_length: None)),
+      #(
+        "name",
+        schema.string_with_length(min_length: Some(1), max_length: None),
+      ),
       #("age", schema.int_range(minimum: 0, maximum: 150)),
       #("tags", schema.array(of: schema.string_enum(values: ["a", "b"]))),
       #("nick", schema.nullable(schema.string())),
@@ -144,7 +147,9 @@ pub fn validate_checks_ranges_and_types_test() {
 
   schema.validate_json(schema.int(), "1.5")
   |> should.equal(
-    Error([ValidationError(path: [], message: "Expected an integer, got a number")]),
+    Error([
+      ValidationError(path: [], message: "Expected an integer, got a number"),
+    ]),
   )
 
   schema.validate_json(schema.float(), "2")
@@ -152,7 +157,9 @@ pub fn validate_checks_ranges_and_types_test() {
 
   schema.validate_json(schema.object(properties: [], required: []), "[]")
   |> should.equal(
-    Error([ValidationError(path: [], message: "Expected an object, got an array")]),
+    Error([
+      ValidationError(path: [], message: "Expected an object, got an array"),
+    ]),
   )
 }
 

@@ -184,7 +184,8 @@ pub fn deepseek_thinking_toggle_test() {
   body |> string.contains("\"disabled\"") |> should.be_false
 
   // Both builders still compile and point at the same model IDs.
-  let a = deepseek.flash(api_key: "k") |> deepseek.temperature(0.1) |> deepseek.build
+  let a =
+    deepseek.flash(api_key: "k") |> deepseek.temperature(0.1) |> deepseek.build
   a.provider.model_id |> should.equal("deepseek-flash")
   let b =
     deepseek_reasoning.v4_pro(api_key: "k")

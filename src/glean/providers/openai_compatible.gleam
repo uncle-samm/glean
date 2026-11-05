@@ -57,13 +57,15 @@ fn do_generate(
   gen_request: GenerateRequest,
 ) -> Result(GenerateResult, GleanError) {
   let body = encode_request(config, gen_request, False)
-  use response_body <- result.try(http_utils.send_post(
-    config,
-    provider_name,
-    config.base_url <> "/chat/completions",
-    body,
-    [#("authorization", "Bearer " <> config.api_key)],
-  ))
+  use response_body <- result.try(
+    http_utils.send_post(
+      config,
+      provider_name,
+      config.base_url <> "/chat/completions",
+      body,
+      [#("authorization", "Bearer " <> config.api_key)],
+    ),
+  )
   decode_response(config.model, response_body)
 }
 
@@ -84,12 +86,7 @@ pub opaque type StreamAccumulator {
 }
 
 type StreamingToolCall {
-  StreamingToolCall(
-    index: Int,
-    id: String,
-    name: StringTree,
-    args: StringTree,
-  )
+  StreamingToolCall(index: Int, id: String, name: StringTree, args: StringTree)
 }
 
 fn do_stream(
@@ -526,11 +523,7 @@ pub fn encode_request(
     |> add_optional("top_p", settings.top_p, json.float)
     |> add_optional("seed", settings.seed, json.int)
     |> add_optional("presence_penalty", settings.presence_penalty, json.float)
-    |> add_optional(
-      "frequency_penalty",
-      settings.frequency_penalty,
-      json.float,
-    )
+    |> add_optional("frequency_penalty", settings.frequency_penalty, json.float)
     |> add_optional("stop", settings.stop_sequences, fn(stops) {
       json.array(stops, json.string)
     })

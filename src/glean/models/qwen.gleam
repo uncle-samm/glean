@@ -3,6 +3,7 @@
 //// Hybrid thinking models take `enable_thinking`; set it with
 //// `configure(config.extra_body_field(_, "enable_thinking", json.bool(True)))`.
 //// For the China endpoint or a workspace URL, set `config.base_url`.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
 import glean/provider.{type ModelSettings, ModelSettings}

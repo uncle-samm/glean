@@ -7,8 +7,8 @@ import glean/message
 import glean/provider as provider_types
 import glean/run
 import glean/schema
-import glean/testing/provider.{ScriptedToolCall, TextResponse, ToolCallResponse}
 import glean/testing/function_provider
+import glean/testing/provider.{ScriptedToolCall, TextResponse, ToolCallResponse}
 import glean/tool
 import gleeunit/should
 

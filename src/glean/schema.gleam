@@ -47,7 +47,8 @@ pub fn object(
   // An empty object is valid: tools that take no arguments use it.
   let prop_names = list.map(properties, fn(p) { p.0 })
   // Property names must be unique.
-  let assert True = list.length(list.unique(prop_names)) == list.length(prop_names)
+  let assert True =
+    list.length(list.unique(prop_names)) == list.length(prop_names)
   // Every required field must be a declared property.
   list.each(required, fn(r) {
     let assert True = list.contains(prop_names, r)
@@ -464,10 +465,7 @@ fn validate_at(
           case list.contains(allowed, text) {
             True -> []
             False -> [
-              error_at(
-                path,
-                "Must be one of: " <> string.join(allowed, ", "),
-              ),
+              error_at(path, "Must be one of: " <> string.join(allowed, ", ")),
             ]
           }
         None -> []

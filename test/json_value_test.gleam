@@ -8,7 +8,8 @@ pub fn round_trip_test() {
       "{\"a\":[1,2.5,\"x\",true,null],\"b\":{\"c\":-3}}",
       json_value.decoder(),
     )
-  let assert Ok(again) = json.parse(json_value.to_string(value), json_value.decoder())
+  let assert Ok(again) =
+    json.parse(json_value.to_string(value), json_value.decoder())
   again |> should.equal(value)
 }
 

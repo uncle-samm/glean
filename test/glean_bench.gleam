@@ -158,10 +158,12 @@ fn person_schema() -> schema.Schema {
     properties: [
       #(
         "people",
-        schema.array(of: schema.object(
-          properties: [#("name", schema.string()), #("age", schema.int())],
-          required: ["name", "age"],
-        )),
+        schema.array(
+          of: schema.object(
+            properties: [#("name", schema.string()), #("age", schema.int())],
+            required: ["name", "age"],
+          ),
+        ),
       ),
     ],
     required: ["people"],

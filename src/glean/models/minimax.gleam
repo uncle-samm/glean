@@ -2,6 +2,7 @@
 ////
 //// MiniMax documents `temperature` and `top_p` as having no effect, so this
 //// builder doesn't offer them.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
 import glean/provider.{type ModelSettings, ModelSettings}
@@ -57,19 +58,28 @@ pub fn custom(api_key key: String, model model_id: String) -> MiniMax {
 /// ```gleam
 /// |> configure(config.timeout(_, 120_000))
 /// ```
-pub fn configure(m: MiniMax, f: fn(ProviderConfig) -> ProviderConfig) -> MiniMax {
+pub fn configure(
+  m: MiniMax,
+  f: fn(ProviderConfig) -> ProviderConfig,
+) -> MiniMax {
   MiniMax(..m, config: f(m.config))
 }
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: MiniMax, n: Int) -> MiniMax {
   let assert True = n > 0
-  MiniMax(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
+  MiniMax(
+    ..m,
+    settings: ModelSettings(..m.settings, max_output_tokens: Some(n)),
+  )
 }
 
 /// Stop generating when the model writes any of these strings.
 pub fn stop_sequences(m: MiniMax, stops: List(String)) -> MiniMax {
-  MiniMax(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
+  MiniMax(
+    ..m,
+    settings: ModelSettings(..m.settings, stop_sequences: Some(stops)),
+  )
 }
 
 // ---------------------------------------------------------------------------

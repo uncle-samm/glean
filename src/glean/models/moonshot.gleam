@@ -3,6 +3,7 @@
 //// The `kimi-k2` series was retired on May 25, 2026 and `kimi-k2.5` and
 //// `moonshot-v1` on Aug 31, 2026. Reasoning is returned as reasoning events
 //// and sent back on later turns.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
 import glean/provider.{type ModelSettings, ModelSettings}
@@ -56,14 +57,20 @@ pub fn custom(api_key key: String, model model_id: String) -> Moonshot {
 /// ```gleam
 /// |> configure(config.timeout(_, 120_000))
 /// ```
-pub fn configure(m: Moonshot, f: fn(ProviderConfig) -> ProviderConfig) -> Moonshot {
+pub fn configure(
+  m: Moonshot,
+  f: fn(ProviderConfig) -> ProviderConfig,
+) -> Moonshot {
   Moonshot(..m, config: f(m.config))
 }
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: Moonshot, n: Int) -> Moonshot {
   let assert True = n > 0
-  Moonshot(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
+  Moonshot(
+    ..m,
+    settings: ModelSettings(..m.settings, max_output_tokens: Some(n)),
+  )
 }
 
 /// Set the sampling temperature.
@@ -78,7 +85,10 @@ pub fn top_p(m: Moonshot, p: Float) -> Moonshot {
 
 /// Stop generating when the model writes any of these strings.
 pub fn stop_sequences(m: Moonshot, stops: List(String)) -> Moonshot {
-  Moonshot(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
+  Moonshot(
+    ..m,
+    settings: ModelSettings(..m.settings, stop_sequences: Some(stops)),
+  )
 }
 
 // ---------------------------------------------------------------------------

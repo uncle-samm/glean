@@ -88,8 +88,7 @@ pub fn invalid_arguments_are_rejected_before_execution_test() {
   let p =
     function_provider.function_provider("test", fn(request) {
       case last_tool_results(request.messages) {
-        [] ->
-          Ok(provider.tool_call_result([#("c1", "add", "{\"a\":\"two\"}")]))
+        [] -> Ok(provider.tool_call_result([#("c1", "add", "{\"a\":\"two\"}")]))
         [message.ToolResultError(error_message: msg, ..)] ->
           Ok(provider.text_result(msg))
         _ -> Ok(provider.text_result("tool ran"))

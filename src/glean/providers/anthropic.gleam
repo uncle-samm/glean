@@ -17,7 +17,7 @@ import glean/json_value
 import glean/message.{type Message}
 import glean/provider.{
   type GenerateRequest, type GenerateResult, type GeneratedContent,
-  type Provider, GenerateResult, GeneratedRedactedReasoning, GeneratedReasoning,
+  type Provider, GenerateResult, GeneratedReasoning, GeneratedRedactedReasoning,
   GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
@@ -175,24 +175,28 @@ fn blocks_to_content(blocks: List(#(Int, Block))) -> List(GeneratedContent) {
     case entry.1 {
       TextBlock(text) -> Ok(GeneratedText(text: string_tree.to_string(text)))
       ThinkingBlock(text, signature) ->
-        Ok(GeneratedReasoning(
-          text: string_tree.to_string(text),
-          signature: case string_tree.to_string(signature) {
-            "" -> None
-            sig -> Some(sig)
-          },
-        ))
+        Ok(
+          GeneratedReasoning(
+            text: string_tree.to_string(text),
+            signature: case string_tree.to_string(signature) {
+              "" -> None
+              sig -> Some(sig)
+            },
+          ),
+        )
       RedactedThinkingBlock(data) -> Ok(GeneratedRedactedReasoning(data: data))
       ToolUseBlock(id, name, args) ->
-        Ok(GeneratedToolCall(
-          tool_call_id: id,
-          tool_name: name,
-          arguments_json: case string_tree.to_string(args) {
-            // A tool with no arguments streams no input at all.
-            "" -> "{}"
-            json -> json
-          },
-        ))
+        Ok(
+          GeneratedToolCall(
+            tool_call_id: id,
+            tool_name: name,
+            arguments_json: case string_tree.to_string(args) {
+              // A tool with no arguments streams no input at all.
+              "" -> "{}"
+              json -> json
+            },
+          ),
+        )
       IgnoredBlock -> Error(Nil)
     }
   })
@@ -332,11 +336,7 @@ fn process_anthropic_event(
           use delta_type <- decode.field("type", decode.string)
           use text <- decode.optional_field("text", "", decode.string)
           use thinking <- decode.optional_field("thinking", "", decode.string)
-          use signature <- decode.optional_field(
-            "signature",
-            "",
-            decode.string,
-          )
+          use signature <- decode.optional_field("signature", "", decode.string)
           use partial_json <- decode.optional_field(
             "partial_json",
             "",
@@ -569,7 +569,9 @@ fn encode_output_config(
   })
   let effort_field = case effort {
     None -> []
-    Some(e) -> [#("effort", json.string(provider.reasoning_effort_to_string(e)))]
+    Some(e) -> [
+      #("effort", json.string(provider.reasoning_effort_to_string(e))),
+    ]
   }
   case list.append(format_field, effort_field) {
     [] -> Ok(None)

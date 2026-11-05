@@ -3,6 +3,7 @@
 //// `deepseek-chat` and `deepseek-reasoner` were retired on Jul 24, 2026.
 //// The current models switch thinking on per request; for thinking mode see
 //// `glean/models/deepseek_reasoning`.
+
 import gleam/json
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
@@ -47,14 +48,20 @@ pub fn custom(api_key key: String, model model_id: String) -> Deepseek {
 /// ```gleam
 /// |> configure(config.timeout(_, 120_000))
 /// ```
-pub fn configure(m: Deepseek, f: fn(ProviderConfig) -> ProviderConfig) -> Deepseek {
+pub fn configure(
+  m: Deepseek,
+  f: fn(ProviderConfig) -> ProviderConfig,
+) -> Deepseek {
   Deepseek(..m, config: f(m.config))
 }
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: Deepseek, n: Int) -> Deepseek {
   let assert True = n > 0
-  Deepseek(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
+  Deepseek(
+    ..m,
+    settings: ModelSettings(..m.settings, max_output_tokens: Some(n)),
+  )
 }
 
 /// Set the sampling temperature.
@@ -69,17 +76,26 @@ pub fn top_p(m: Deepseek, p: Float) -> Deepseek {
 
 /// Set the presence penalty.
 pub fn presence_penalty(m: Deepseek, pp: Float) -> Deepseek {
-  Deepseek(..m, settings: ModelSettings(..m.settings, presence_penalty: Some(pp)))
+  Deepseek(
+    ..m,
+    settings: ModelSettings(..m.settings, presence_penalty: Some(pp)),
+  )
 }
 
 /// Set the frequency penalty.
 pub fn frequency_penalty(m: Deepseek, fp: Float) -> Deepseek {
-  Deepseek(..m, settings: ModelSettings(..m.settings, frequency_penalty: Some(fp)))
+  Deepseek(
+    ..m,
+    settings: ModelSettings(..m.settings, frequency_penalty: Some(fp)),
+  )
 }
 
 /// Stop generating when the model writes any of these strings.
 pub fn stop_sequences(m: Deepseek, stops: List(String)) -> Deepseek {
-  Deepseek(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
+  Deepseek(
+    ..m,
+    settings: ModelSettings(..m.settings, stop_sequences: Some(stops)),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -93,10 +109,11 @@ pub fn build(m: Deepseek) -> Model {
 
 fn new(key: String, model_id: String) -> Deepseek {
   Deepseek(
-    config: 
-  deepseek_provider.default_config(api_key: key, model: model_id)
-  |> config.extra_body_field("thinking", json.object([#("type", json.string("disabled"))]))
-  ,
+    config: deepseek_provider.default_config(api_key: key, model: model_id)
+      |> config.extra_body_field(
+        "thinking",
+        json.object([#("type", json.string("disabled"))]),
+      ),
     settings: provider.default_settings(),
   )
 }

@@ -2,6 +2,7 @@
 //// and `top_k` under the API version glean sends (`2023-06-01`).
 ////
 //// For current models, see `glean/models/anthropic`.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
 import glean/provider.{type ModelSettings, ModelSettings}
@@ -61,19 +62,28 @@ pub fn custom(api_key key: String, model model_id: String) -> ClaudeSampling {
 /// ```gleam
 /// |> configure(config.timeout(_, 120_000))
 /// ```
-pub fn configure(m: ClaudeSampling, f: fn(ProviderConfig) -> ProviderConfig) -> ClaudeSampling {
+pub fn configure(
+  m: ClaudeSampling,
+  f: fn(ProviderConfig) -> ProviderConfig,
+) -> ClaudeSampling {
   ClaudeSampling(..m, config: f(m.config))
 }
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: ClaudeSampling, n: Int) -> ClaudeSampling {
   let assert True = n > 0
-  ClaudeSampling(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
+  ClaudeSampling(
+    ..m,
+    settings: ModelSettings(..m.settings, max_output_tokens: Some(n)),
+  )
 }
 
 /// Set the sampling temperature.
 pub fn temperature(m: ClaudeSampling, t: Float) -> ClaudeSampling {
-  ClaudeSampling(..m, settings: ModelSettings(..m.settings, temperature: Some(t)))
+  ClaudeSampling(
+    ..m,
+    settings: ModelSettings(..m.settings, temperature: Some(t)),
+  )
 }
 
 /// Set the top-p (nucleus sampling) value.
@@ -87,8 +97,14 @@ pub fn top_k(m: ClaudeSampling, k: Int) -> ClaudeSampling {
 }
 
 /// Stop generating when the model writes any of these strings.
-pub fn stop_sequences(m: ClaudeSampling, stops: List(String)) -> ClaudeSampling {
-  ClaudeSampling(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
+pub fn stop_sequences(
+  m: ClaudeSampling,
+  stops: List(String),
+) -> ClaudeSampling {
+  ClaudeSampling(
+    ..m,
+    settings: ModelSettings(..m.settings, stop_sequences: Some(stops)),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +113,10 @@ pub fn stop_sequences(m: ClaudeSampling, stops: List(String)) -> ClaudeSampling 
 
 /// Build a `Model` to use with `agent.new`.
 pub fn build(m: ClaudeSampling) -> Model {
-  Model(provider: anthropic_provider.from_config(m.config), settings: m.settings)
+  Model(
+    provider: anthropic_provider.from_config(m.config),
+    settings: m.settings,
+  )
 }
 
 fn new(key: String, model_id: String) -> ClaudeSampling {

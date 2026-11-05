@@ -2,6 +2,7 @@
 ////
 //// Supported parameters: max_output_tokens, temperature, top_p, top_k,
 //// seed, stop_sequences.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
 import glean/provider.{type ModelSettings, ModelSettings}
@@ -122,7 +123,10 @@ pub fn seed(m: Gemini, s: Int) -> Gemini {
 
 /// Stop generating when the model writes any of these strings.
 pub fn stop_sequences(m: Gemini, stops: List(String)) -> Gemini {
-  Gemini(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
+  Gemini(
+    ..m,
+    settings: ModelSettings(..m.settings, stop_sequences: Some(stops)),
+  )
 }
 
 // ---------------------------------------------------------------------------

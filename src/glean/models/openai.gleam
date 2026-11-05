@@ -3,6 +3,7 @@
 ////
 //// GPT-5 and later are reasoning models that reject a non-default
 //// `temperature`; use `glean/models/openai_reasoning` for those.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
 import glean/provider.{type ModelSettings, ModelSettings}

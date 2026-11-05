@@ -67,7 +67,11 @@ fn send_with_retry(
 
   let can_retry = attempt < config.max_retries
   let retry = fn(retry_after: Option(String)) {
-    process.sleep(retry_delay(delay_ms, retry_after, int.random(delay_ms / 2 + 1)))
+    process.sleep(retry_delay(
+      delay_ms,
+      retry_after,
+      int.random(delay_ms / 2 + 1),
+    ))
     send_with_retry(req, config, provider_name, attempt + 1, delay_ms * 2)
   }
 
@@ -85,7 +89,8 @@ fn send_with_retry(
     Ok(resp) if resp.status >= 200 && resp.status < 300 -> Ok(resp.body)
     Ok(resp) ->
       case is_retryable(resp.status) && can_retry {
-        True -> retry(option.from_result(response.get_header(resp, "retry-after")))
+        True ->
+          retry(option.from_result(response.get_header(resp, "retry-after")))
         False ->
           Error(error.ProviderError(
             provider: provider_name,

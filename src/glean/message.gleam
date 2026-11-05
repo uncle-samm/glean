@@ -72,4 +72,3 @@ pub fn tool_results(results: List(ToolResult)) -> Message {
     }
   ToolResultMessage(results: results)
 }
-

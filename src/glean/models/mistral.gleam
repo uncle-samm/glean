@@ -2,6 +2,7 @@
 ////
 //// Supported parameters: max_output_tokens, temperature, top_p,
 //// stop_sequences.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
 import glean/provider.{type ModelSettings, ModelSettings}
@@ -90,14 +91,20 @@ pub fn custom(api_key key: String, model model_id: String) -> Mistral {
 /// ```gleam
 /// |> configure(config.timeout(_, 120_000))
 /// ```
-pub fn configure(m: Mistral, f: fn(ProviderConfig) -> ProviderConfig) -> Mistral {
+pub fn configure(
+  m: Mistral,
+  f: fn(ProviderConfig) -> ProviderConfig,
+) -> Mistral {
   Mistral(..m, config: f(m.config))
 }
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: Mistral, n: Int) -> Mistral {
   let assert True = n > 0
-  Mistral(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
+  Mistral(
+    ..m,
+    settings: ModelSettings(..m.settings, max_output_tokens: Some(n)),
+  )
 }
 
 /// Set the sampling temperature.
@@ -112,7 +119,10 @@ pub fn top_p(m: Mistral, p: Float) -> Mistral {
 
 /// Stop generating when the model writes any of these strings.
 pub fn stop_sequences(m: Mistral, stops: List(String)) -> Mistral {
-  Mistral(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
+  Mistral(
+    ..m,
+    settings: ModelSettings(..m.settings, stop_sequences: Some(stops)),
+  )
 }
 
 // ---------------------------------------------------------------------------

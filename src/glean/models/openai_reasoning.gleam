@@ -4,9 +4,10 @@
 //// `max_output_tokens` and `reasoning_effort`. The "pro" models are only
 //// served by the Responses API, which glean doesn't speak yet, so they are
 //// not listed.
+
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
-import glean/provider.{type ModelSettings, ModelSettings, type ReasoningEffort}
+import glean/provider.{type ModelSettings, type ReasoningEffort, ModelSettings}
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/openai as openai_provider
 
@@ -102,19 +103,28 @@ pub fn custom(api_key key: String, model model_id: String) -> Reasoning {
 /// ```gleam
 /// |> configure(config.timeout(_, 120_000))
 /// ```
-pub fn configure(m: Reasoning, f: fn(ProviderConfig) -> ProviderConfig) -> Reasoning {
+pub fn configure(
+  m: Reasoning,
+  f: fn(ProviderConfig) -> ProviderConfig,
+) -> Reasoning {
   Reasoning(..m, config: f(m.config))
 }
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: Reasoning, n: Int) -> Reasoning {
   let assert True = n > 0
-  Reasoning(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
+  Reasoning(
+    ..m,
+    settings: ModelSettings(..m.settings, max_output_tokens: Some(n)),
+  )
 }
 
 /// Set how much the model should think before answering.
 pub fn reasoning_effort(m: Reasoning, effort: ReasoningEffort) -> Reasoning {
-  Reasoning(..m, settings: ModelSettings(..m.settings, reasoning_effort: Some(effort)))
+  Reasoning(
+    ..m,
+    settings: ModelSettings(..m.settings, reasoning_effort: Some(effort)),
+  )
 }
 
 // ---------------------------------------------------------------------------
