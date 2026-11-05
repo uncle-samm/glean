@@ -203,7 +203,7 @@ fn tool_loop_agent(steps: Int) -> agent.Agent(Nil) {
         False -> Ok(test_provider.text_result("done"))
       }
     })
-  let echo =
+  let echo_tool =
     tool.new(
       name: "echo",
       description: "Echo",
@@ -214,6 +214,6 @@ fn tool_loop_agent(steps: Int) -> agent.Agent(Nil) {
       execute: fn(_ctx, _args) { Ok("hi") },
     )
   agent.new(p)
-  |> agent.tools(tool.toolset([echo]))
+  |> agent.tools(tool.toolset([echo_tool]))
   |> agent.max_steps(steps + 1)
 }

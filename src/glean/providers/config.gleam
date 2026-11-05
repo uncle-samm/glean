@@ -3,7 +3,6 @@
 //// Model builders expose this through their `configure` function, e.g.
 //// `anthropic.sonnet_5(key) |> anthropic.configure(config.timeout(_, 120_000))`.
 
-import gleam/http.{type Header}
 import gleam/json.{type Json}
 import gleam/list
 
@@ -17,7 +16,7 @@ pub type ProviderConfig {
     /// Model ID to use
     model: String,
     /// Additional HTTP headers
-    headers: List(Header),
+    headers: List(#(String, String)),
     /// Request timeout in milliseconds
     timeout_ms: Int,
     /// Field name for max tokens parameter (e.g. "max_completion_tokens" or "max_tokens")
@@ -65,7 +64,7 @@ pub fn base_url(config: ProviderConfig, url: String) -> ProviderConfig {
 /// Add extra headers.
 pub fn headers(
   config: ProviderConfig,
-  headers: List(Header),
+  headers: List(#(String, String)),
 ) -> ProviderConfig {
   ProviderConfig(..config, headers: headers)
 }

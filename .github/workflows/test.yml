@@ -17,13 +17,6 @@ jobs:
           otp-version: "29"
           gleam-version: "1.19.1"
           rebar3-version: "3"
-      # TEMPORARY: print what `gleam add` / `gleam update` change, so the
-      # result can be committed. Removed before merge.
-      - name: Dependency update preview
-        run: |
-          gleam add --dev gleam_time
-          gleam update
-          git diff gleam.toml manifest.toml
       - run: gleam deps download
       - run: gleam test
       - run: gleam format --check src test
