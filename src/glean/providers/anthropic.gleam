@@ -681,11 +681,13 @@ fn encode_user_content(content: message.UserContent) -> json.Json {
 }
 
 /// Thinking without a signature (e.g. reasoning that came from another
-/// provider) can't be replayed to Claude, so it is left out.
+/// provider) can't be replayed to Claude, so it is left out. So is empty
+/// text, which the Messages API rejects.
 fn encode_assistant_content(
   content: message.AssistantContent,
 ) -> Result(json.Json, Nil) {
   case content {
+    message.AssistantText("") -> Error(Nil)
     message.AssistantText(text) ->
       Ok(
         json.object([
