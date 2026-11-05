@@ -71,8 +71,7 @@ pub fn stop_sequences(m: DeepseekChat, stops: List(String)) -> DeepseekChat {
 
 /// Build a `Model` from this DeepSeek Chat configuration.
 pub fn build(m: DeepseekChat) -> Model {
-  let provider =
-    deepseek_provider.new(api_key: m.api_key, model: m.model_id)
+  let provider = deepseek_provider.new(api_key: m.api_key, model: m.model_id)
 
   let settings =
     ModelSettings(

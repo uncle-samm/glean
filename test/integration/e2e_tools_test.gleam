@@ -1,7 +1,6 @@
 /// End-to-end tests exercising real tool calls, streaming, and structured output.
 /// Simulates the kind of workflows used in production backends:
 /// web search, web fetch, multi-tool orchestration, and structured extraction.
-
 import gleam/dynamic/decode
 import gleam/http
 import gleam/http/request
@@ -94,10 +93,7 @@ fn do_web_fetch(url: String) -> Result(String, error.GleanError) {
               Error(error.ToolExecutionError(
                 tool_name: "web_fetch",
                 tool_call_id: "",
-                reason: "HTTP "
-                  <> int.to_string(resp.status)
-                  <> " for: "
-                  <> url,
+                reason: "HTTP " <> int.to_string(resp.status) <> " for: " <> url,
               ))
           }
       }
@@ -389,19 +385,12 @@ pub fn e2e_streaming_with_tools_test() {
         run.stream(a, Nil, "What is 15 multiplied by 7?", fn(event) {
           case event {
             stream.StepStart(step) ->
-              io.println(
-                "[e2e_streaming] StepStart: " <> int.to_string(step),
-              )
+              io.println("[e2e_streaming] StepStart: " <> int.to_string(step))
             stream.StepEnd(step) ->
-              io.println(
-                "[e2e_streaming] StepEnd: " <> int.to_string(step),
-              )
+              io.println("[e2e_streaming] StepEnd: " <> int.to_string(step))
             stream.ToolResultEvent(_, tool_name, output) ->
               io.println(
-                "[e2e_streaming] ToolResult("
-                <> tool_name
-                <> "): "
-                <> output,
+                "[e2e_streaming] ToolResult(" <> tool_name <> "): " <> output,
               )
             stream.Finish(_, finish_usage) ->
               io.println(
@@ -468,8 +457,7 @@ pub fn e2e_structured_output_test() {
           required: ["name", "capital", "population_millions", "continent"],
         )
 
-      let oai_provider =
-        openai.new(api_key: api_key, model: "gpt-5-nano")
+      let oai_provider = openai.new(api_key: api_key, model: "gpt-5-nano")
 
       // Call the provider directly with structured output format
       let request =
@@ -606,7 +594,11 @@ pub fn e2e_model_type_with_tools_anthropic_test() {
         |> agent.max_steps(5)
 
       case
-        run.generate(a, Nil, "Calculate 99 times 101 using the calculator tool.")
+        run.generate(
+          a,
+          Nil,
+          "Calculate 99 times 101 using the calculator tool.",
+        )
       {
         Ok(result) -> {
           io.println(
@@ -656,9 +648,7 @@ pub fn e2e_multi_turn_with_tools_test() {
             || string.contains(result1.text, "1,596")
 
           // Turn 2: Follow-up referencing previous result
-          case
-            run.continue(a, Nil, result1, "Now divide that result by 6.")
-          {
+          case run.continue(a, Nil, result1, "Now divide that result by 6.") {
             Ok(result2) -> {
               io.println("[e2e_multi_turn] Turn 2: " <> result2.text)
               // 1596 / 6 = 266
@@ -673,4 +663,3 @@ pub fn e2e_multi_turn_with_tools_test() {
     }
   }
 }
-

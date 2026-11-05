@@ -1,5 +1,4 @@
 /// OpenAI provider (GPT-4o, GPT-4, o1, o3, etc.)
-
 import glean/provider.{type Provider}
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/openai_compatible

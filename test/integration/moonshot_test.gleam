@@ -5,8 +5,9 @@ import glean/providers/moonshot
 import glean/run
 import glean/schema
 import glean/tool
-import integration/integration_helpers.{assert_non_empty_text, cheap_settings,
-  fail, get_api_key}
+import integration/integration_helpers.{
+  assert_non_empty_text, cheap_settings, fail, get_api_key,
+}
 
 const env_var = "MOONSHOT_API_KEY"
 

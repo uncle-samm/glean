@@ -9,11 +9,10 @@ A Gleam framework for building AI agents. Think [Vercel AI SDK](https://github.c
 
 - **Type-safe model builders** — each model only exposes its supported parameters. The compiler catches unsupported settings.
 - **10 providers, 78+ models** — OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, Qwen, Moonshot, MiniMax, OpenRouter, plus any OpenAI-compatible endpoint
-- **Tool calling** — typed tools with dependency injection, JSON schema validation, retry logic, and error recovery
+- **Tool calling** — typed tools with dependency injection, JSON Schema tool definitions, retry logic, and error recovery
 - **Real streaming** — SSE-based streaming with start/delta/end events for text, reasoning, and tool calls across all providers
 - **Multi-turn conversations** — continue previous conversations with full message history
 - **Middleware** — composable request/result transformers
-- **Structured output** — JSON schema response format
 - **Simulation testing** — deterministic multi-step agent testing without API calls
 - **Pure Gleam** — no FFI, no macros, no magic. BEAM-only target.
 
@@ -187,31 +186,6 @@ let deps = Deps(db: my_db, api_base_url: "https://api.example.com")
 run.generate(my_agent, deps, "Look up user 123")
 ```
 
-### Structured output
-
-Request JSON responses conforming to a schema:
-
-```gleam
-import glean/provider
-import glean/schema
-
-let response_schema = schema.object(
-  properties: [
-    #("name", schema.string()),
-    #("age", schema.int()),
-    #("hobbies", schema.array(of: schema.string())),
-  ],
-  required: ["name", "age", "hobbies"],
-)
-
-let my_agent =
-  agent.from(model)
-  |> agent.settings(provider.ModelSettings(
-    ..provider.default_settings(),
-    response_format: Some(provider.JsonFormat),
-  ))
-```
-
 ## Type-Safe Model Builders
 
 Each provider has its own opaque type that only exposes the parameters that model supports. The compiler prevents unsupported settings.
@@ -360,11 +334,14 @@ let flaky_tool = tool.new(
 |> tool.with_max_retries(3)
 ```
 
-Retries apply to `ToolExecutionError` and `ToolInputValidationError`. `ToolNotFound` is immediately fatal.
+Retries apply to any error returned by the tool's `execute` function. Once retries run out, the error is sent back to the model so it can recover. A call to a tool that isn't in the toolset (`ToolNotFound`) ends the run immediately.
 
 ## Provider Configuration
 
-For advanced use cases, configure providers directly with `ProviderConfig`:
+For advanced use cases, configure providers directly with `ProviderConfig`.
+
+> Note: `glean/providers/*` modules are currently internal, so they don't appear on HexDocs and the compiler warns when you import them. A public API for custom model IDs, base URLs and timeouts is planned.
+
 
 ```gleam
 import glean/providers/config
@@ -424,7 +401,7 @@ Glean runs on the **BEAM** (Erlang VM) only. JavaScript is not supported — the
 
 ```sh
 gleam build    # Compile
-gleam test     # Run 123 unit tests (no API keys needed)
+gleam test     # Run the unit tests (no API keys needed; integration tests are no-ops without keys)
 
 # Integration tests (set API keys)
 export OPENAI_API_KEY=sk-...

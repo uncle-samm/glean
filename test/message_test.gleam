@@ -4,8 +4,7 @@ import gleeunit/should
 pub fn system_message_test() {
   let msg = message.system("You are helpful")
   case msg {
-    message.SystemMessage(content) ->
-      content |> should.equal("You are helpful")
+    message.SystemMessage(content) -> content |> should.equal("You are helpful")
     _ -> panic as "Expected SystemMessage"
   }
 }

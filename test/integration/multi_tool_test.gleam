@@ -4,8 +4,9 @@ import glean/providers/openai
 import glean/run
 import glean/schema
 import glean/tool
-import integration/integration_helpers.{assert_non_empty_text, cheap_settings,
-  fail, get_api_key}
+import integration/integration_helpers.{
+  assert_non_empty_text, cheap_settings, fail, get_api_key,
+}
 
 fn make_weather_tool() {
   tool.new(
@@ -71,10 +72,7 @@ pub fn multi_tool_anthropic_test() {
     Error(Nil) -> Nil
     Ok(api_key) -> {
       let provider =
-        anthropic.new(
-          api_key: api_key,
-          model: "claude-haiku-4-5-20251001",
-        )
+        anthropic.new(api_key: api_key, model: "claude-haiku-4-5-20251001")
       let a =
         agent.new(provider)
         |> agent.tools(tool.toolset([make_weather_tool(), make_time_tool()]))
@@ -123,10 +121,7 @@ pub fn multi_tool_sequential_test() {
           description: "Summarize a piece of text into one sentence",
           input_schema: schema.object(
             properties: [
-              #(
-                "text",
-                schema.string() |> schema.describe("Text to summarize"),
-              ),
+              #("text", schema.string() |> schema.describe("Text to summarize")),
             ],
             required: ["text"],
           ),

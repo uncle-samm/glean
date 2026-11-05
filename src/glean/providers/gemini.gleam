@@ -1,20 +1,20 @@
 /// Google Gemini provider (gemini-2.5-pro, gemini-2.5-flash, etc.)
 /// Uses the Gemini REST API format (different from OpenAI).
-
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/string
 import gleam/string_tree
 import glean/error.{type FinishReason, type GleanError}
 import glean/json_value
 import glean/message.{type Message}
 import glean/provider.{
-  type GenerateRequest, type GenerateResult, type GeneratedContent, type Provider,
-  GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type GenerateRequest, type GenerateResult, type GeneratedContent,
+  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
@@ -59,12 +59,7 @@ fn do_generate(
   gen_request: GenerateRequest,
 ) -> Result(GenerateResult, GleanError) {
   let body = encode_request(gen_request)
-  let url =
-    config.base_url
-    <> "/models/"
-    <> config.model
-    <> ":generateContent?key="
-    <> config.api_key
+  let url = config.base_url <> "/models/" <> config.model <> ":generateContent"
 
   case make_http_request(config, url, body) {
     Error(err) -> Error(err)
@@ -80,6 +75,8 @@ type GeminiStreamAccumulator {
     tool_calls: List(GeminiStreamToolCall),
     finish_reason: FinishReason,
     usage: Usage,
+    /// True once a chunk carrying a finishReason has been seen.
+    finished: Bool,
   )
 }
 
@@ -97,12 +94,14 @@ fn do_stream(
     config.base_url
     <> "/models/"
     <> config.model
-    <> ":streamGenerateContent?key="
-    <> config.api_key
-    <> "&alt=sse"
+    <> ":streamGenerateContent?alt=sse"
 
-  // Gemini uses API key in URL, no auth headers needed
-  let headers = list.map(config.headers, fn(h) { #(h.0, h.1) })
+  // The API key goes in a header, never the URL, so it can't leak into
+  // logs, proxies, or error messages.
+  let headers = [
+    #("x-goog-api-key", config.api_key),
+    ..list.map(config.headers, fn(h) { #(h.0, h.1) })
+  ]
 
   case sse.start_stream(url, headers, body, config.timeout_ms) {
     Error(msg) ->
@@ -119,16 +118,17 @@ fn do_stream(
           tool_calls: [],
           finish_reason: error.Stop,
           usage: stream.zero_usage(),
+          finished: False,
         )
 
-      let final_acc =
-        gemini_stream_loop(
-          event_subject,
-          manager_subject,
-          acc,
-          on_event,
-          config.timeout_ms,
-        )
+      use final_acc <- result.try(gemini_stream_loop(
+        event_subject,
+        manager_subject,
+        acc,
+        on_event,
+        config.model,
+        config.timeout_ms,
+      ))
 
       let text_content = case string_tree.to_string(final_acc.text) {
         "" -> []
@@ -154,24 +154,71 @@ fn do_stream(
   }
 }
 
+/// Receive SSE events until the stream closes.
+///
+/// Gemini ends a stream by closing the connection, so `Closed` is only a
+/// success after a chunk carrying a finishReason. Timeouts, early closes
+/// (including non-2xx responses, whose status the SSE client hides) and
+/// in-stream error payloads are returned as errors.
 fn gemini_stream_loop(
   subject: process.Subject(httpp_sse.SSEEvent),
   manager: process.Subject(httpp_sse.SSEManagerMessage),
   acc: GeminiStreamAccumulator,
   on_event: fn(StreamEvent) -> Nil,
+  model: String,
   timeout_ms: Int,
-) -> GeminiStreamAccumulator {
+) -> Result(GeminiStreamAccumulator, GleanError) {
   case process.receive(subject, timeout_ms) {
     Error(_) -> {
       process.send(manager, httpp_sse.Shutdown)
-      acc
+      Error(error.Timeout(after_ms: timeout_ms))
     }
-    Ok(httpp_sse.Closed) -> acc
-    Ok(httpp_sse.Event(_event_type, _event_id, data)) -> {
-      let new_acc = process_gemini_chunk(acc, data, on_event)
-      gemini_stream_loop(subject, manager, new_acc, on_event, timeout_ms)
-    }
+    Ok(httpp_sse.Closed) ->
+      case acc.finished {
+        True -> Ok(acc)
+        False ->
+          Error(error.ProviderError(
+            provider: "gemini",
+            model: model,
+            status: 0,
+            message: "Stream closed before the response finished",
+          ))
+      }
+    Ok(httpp_sse.Event(_event_type, _event_id, data)) ->
+      case json.parse(data, stream_error_decoder()) {
+        Ok(message) -> {
+          process.send(manager, httpp_sse.Shutdown)
+          Error(error.ProviderError(
+            provider: "gemini",
+            model: model,
+            status: 0,
+            message: message,
+          ))
+        }
+        Error(_) ->
+          gemini_stream_loop(
+            subject,
+            manager,
+            process_gemini_chunk(acc, data, on_event),
+            on_event,
+            model,
+            timeout_ms,
+          )
+      }
   }
+}
+
+/// Decodes an in-stream error payload: `{"error": {"message": "..."}}`.
+fn stream_error_decoder() -> decode.Decoder(String) {
+  use message <- decode.field("error", {
+    use message <- decode.optional_field(
+      "message",
+      "Unknown streaming error",
+      decode.string,
+    )
+    decode.success(message)
+  })
+  decode.success(message)
 }
 
 fn process_gemini_chunk(
@@ -196,10 +243,7 @@ fn process_gemini_chunk(
             }
             provider.GeneratedReasoning(text: text) -> {
               on_event(stream.ReasoningDelta(id: "gemini", delta: text))
-              GeminiStreamAccumulator(
-                ..a,
-                text: string_tree.append(a.text, text),
-              )
+              a
             }
             GeneratedToolCall(
               tool_call_id: id,
@@ -216,18 +260,11 @@ fn process_gemini_chunk(
                 tool_call_id: id,
                 delta: args,
               ))
-              on_event(stream.ToolCallEnd(
-                id: "gemini",
-                tool_call_id: id,
-              ))
+              on_event(stream.ToolCallEnd(id: "gemini", tool_call_id: id))
               GeminiStreamAccumulator(
                 ..a,
                 tool_calls: list.append(a.tool_calls, [
-                  GeminiStreamToolCall(
-                    id: id,
-                    name: name,
-                    args_json: args,
-                  ),
+                  GeminiStreamToolCall(id: id, name: name, args_json: args),
                 ]),
               )
             }
@@ -241,6 +278,7 @@ fn process_gemini_chunk(
           GeminiStreamAccumulator(
             ..acc,
             finish_reason: parse_gemini_finish_reason(fr),
+            finished: True,
           )
       }
 
@@ -267,11 +305,7 @@ fn gemini_chunk_decoder() -> decode.Decoder(GeminiChunk) {
 
   let candidate_decoder = {
     use content <- decode.optional_field("content", [], {
-      use parts <- decode.optional_field(
-        "parts",
-        [],
-        decode.list(part_decoder),
-      )
+      use parts <- decode.optional_field("parts", [], decode.list(part_decoder))
       decode.success(parts)
     })
     use finish_reason <- decode.optional_field(
@@ -322,8 +356,9 @@ fn make_http_request(
   url: String,
   body: String,
 ) -> Result(String, GleanError) {
-  // Gemini uses API key in URL, not in Authorization header
-  http_utils.send_post(config, "gemini", url, body, [])
+  http_utils.send_post(config, "gemini", url, body, [
+    #("x-goog-api-key", config.api_key),
+  ])
 }
 
 // --- Request encoding (Gemini format) ---
@@ -419,9 +454,7 @@ fn encode_request(gen_request: GenerateRequest) -> String {
   |> json.to_string
 }
 
-fn split_system(
-  messages: List(Message),
-) -> #(List(String), List(Message)) {
+fn split_system(messages: List(Message)) -> #(List(String), List(Message)) {
   let system =
     list.filter_map(messages, fn(m) {
       case m {
@@ -451,10 +484,7 @@ fn encode_content(msg: Message) -> List(json.Json) {
     message.UserMessage(content) -> [
       json.object([
         #("role", json.string("user")),
-        #(
-          "parts",
-          json.preprocessed_array(list.map(content, encode_user_part)),
-        ),
+        #("parts", json.preprocessed_array(list.map(content, encode_user_part))),
       ]),
     ]
     message.AssistantMessage(content) -> [
@@ -471,9 +501,7 @@ fn encode_content(msg: Message) -> List(json.Json) {
         #("role", json.string("user")),
         #(
           "parts",
-          json.preprocessed_array(
-            list.map(results, encode_function_response),
-          ),
+          json.preprocessed_array(list.map(results, encode_function_response)),
         ),
       ]),
     ]
@@ -545,10 +573,7 @@ fn encode_function_response(result: message.ToolResult) -> json.Json {
           "functionResponse",
           json.object([
             #("name", json.string(tool_name)),
-            #(
-              "response",
-              json.object([#("result", json.string(output))]),
-            ),
+            #("response", json.object([#("result", json.string(output))])),
           ]),
         ),
       ])
@@ -558,10 +583,7 @@ fn encode_function_response(result: message.ToolResult) -> json.Json {
           "functionResponse",
           json.object([
             #("name", json.string(tool_name)),
-            #(
-              "response",
-              json.object([#("error", json.string(error_message))]),
-            ),
+            #("response", json.object([#("error", json.string(error_message))])),
           ]),
         ),
       ])
@@ -677,8 +699,7 @@ fn function_call_part_decoder() -> decode.Decoder(GeneratedContent) {
   // Encode thoughtSignature in tool_call_id for round-tripping.
   // Use random suffix to avoid duplicate IDs when same tool is called twice.
   let tool_call_id = case thought_sig {
-    "" ->
-      "gemini_tc_" <> fc.0 <> "_" <> int.to_string(int.random(999_999_999))
+    "" -> "gemini_tc_" <> fc.0 <> "_" <> int.to_string(int.random(999_999_999))
     sig -> "gemini_sig:" <> sig
   }
   decode.success(GeneratedToolCall(
@@ -697,4 +718,3 @@ fn parse_gemini_finish_reason(reason: String) -> FinishReason {
     other -> error.Other(other)
   }
 }
-

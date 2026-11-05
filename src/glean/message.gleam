@@ -1,6 +1,5 @@
 /// Conversation message types.
 /// Discriminated union by role with typed content parts.
-
 pub type Message {
   SystemMessage(content: String)
   UserMessage(content: List(UserContent))
@@ -56,10 +55,11 @@ pub fn assistant(text: String) -> Message {
 }
 
 pub fn tool_results(results: List(ToolResult)) -> Message {
-  let assert True = !{
-    results
-    |> list.is_empty
-  }
+  let assert True =
+    !{
+      results
+      |> list.is_empty
+    }
   ToolResultMessage(results: results)
 }
 

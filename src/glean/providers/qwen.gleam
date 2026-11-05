@@ -1,6 +1,5 @@
 /// Alibaba Qwen provider via DashScope (qwen-plus, qwen-turbo, qwen-max, etc.)
 /// OpenAI-compatible API endpoint.
-
 import glean/provider.{type Provider}
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/openai_compatible

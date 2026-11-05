@@ -1,6 +1,5 @@
 /// MiniMax provider.
 /// Fully OpenAI-compatible API.
-
 import glean/provider.{type Provider}
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/openai_compatible

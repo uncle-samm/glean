@@ -90,3 +90,10 @@ import gleam/string
 fn contains(haystack: String, needle: String) -> Bool {
   string.contains(haystack, needle)
 }
+
+pub fn empty_object_schema_test() {
+  // Tools with no arguments need an object schema with no properties.
+  schema.object(properties: [], required: [])
+  |> schema.to_json_string
+  |> should.equal("{\"type\":\"object\",\"properties\":{}}")
+}

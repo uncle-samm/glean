@@ -1,10 +1,11 @@
 import gleam/list
 import glean/agent
 import glean/error
+import glean/message
 import glean/run
 import glean/schema
-import glean/tool
 import glean/testing/provider.{ScriptedToolCall, TextResponse, ToolCallResponse}
+import glean/tool
 import gleeunit/should
 
 pub fn simple_text_generation_test() {
@@ -70,7 +71,10 @@ pub fn max_steps_exceeded_test() {
     tool.new(
       name: "loop",
       description: "Loops forever",
-      input_schema: schema.object(properties: [#("x", schema.string())], required: []),
+      input_schema: schema.object(
+        properties: [#("x", schema.string())],
+        required: [],
+      ),
       execute: fn(_ctx, _args) { Ok("looping") },
     )
 
@@ -83,8 +87,7 @@ pub fn max_steps_exceeded_test() {
     Ok(_) -> panic as "Expected error"
     Error(err) ->
       case err {
-        error.MaxStepsExceeded(max_steps, _) ->
-          max_steps |> should.equal(3)
+        error.MaxStepsExceeded(max_steps, _) -> max_steps |> should.equal(3)
         _ -> panic as "Expected MaxStepsExceeded"
       }
   }
@@ -124,8 +127,7 @@ pub fn provider_error_propagated_test() {
     Ok(_) -> panic as "Expected error"
     Error(err) ->
       case err {
-        error.ProviderError(_, _, status, _) ->
-          status |> should.equal(500)
+        error.ProviderError(_, _, status, _) -> status |> should.equal(500)
         _ -> panic as "Expected ProviderError"
       }
   }
@@ -145,7 +147,10 @@ pub fn dependency_injection_test() {
     tool.new(
       name: "greet",
       description: "Greet with prefix",
-      input_schema: schema.object(properties: [#("x", schema.string())], required: []),
+      input_schema: schema.object(
+        properties: [#("x", schema.string())],
+        required: [],
+      ),
       execute: fn(ctx, _args) {
         // ctx.deps should be our injected string
         Ok("Hello from " <> ctx.deps)
@@ -160,6 +165,37 @@ pub fn dependency_injection_test() {
     Ok(result) -> {
       result.text |> should.equal("Done")
       result.steps |> should.equal(2)
+    }
+    Error(_) -> panic as "Expected Ok"
+  }
+}
+
+pub fn final_answer_is_kept_in_messages_test() {
+  let p = provider.test_provider([TextResponse("Hello, Sam!")])
+  let a = agent.new(p)
+
+  case run.generate(a, Nil, "Hi, I'm Sam") {
+    Ok(result) ->
+      list.last(result.messages)
+      |> should.equal(
+        Ok(message.AssistantMessage([message.AssistantText("Hello, Sam!")])),
+      )
+    Error(_) -> panic as "Expected Ok"
+  }
+}
+
+pub fn continue_sends_previous_answer_test() {
+  // The test provider picks its response by counting assistant messages,
+  // so the second turn only gets "second" if the first answer is in history.
+  let p =
+    provider.test_provider([TextResponse("first"), TextResponse("second")])
+  let a = agent.new(p)
+
+  let assert Ok(first) = run.generate(a, Nil, "one")
+  case run.continue(a, Nil, first, "two") {
+    Ok(second) -> {
+      second.text |> should.equal("second")
+      list.length(second.messages) |> should.equal(4)
     }
     Error(_) -> panic as "Expected Ok"
   }

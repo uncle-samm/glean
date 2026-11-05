@@ -1,6 +1,5 @@
 /// Function-backed test provider.
 /// Delegates to a user-supplied function for full control over responses.
-
 import glean/error.{type GleanError}
 import glean/provider.{
   type GenerateRequest, type GenerateResult, type Provider, Provider,

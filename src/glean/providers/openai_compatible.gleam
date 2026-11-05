@@ -1,18 +1,18 @@
 /// Shared implementation for all OpenAI-compatible providers.
 /// OpenAI, DeepSeek, Mistral, OpenRouter, Moonshot/Kimi, Qwen, MiniMax all use this format.
-
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 import gleam/string_tree
 import glean/error.{type FinishReason, type GleanError}
 import glean/message.{type Message}
 import glean/provider.{
-  type GenerateRequest, type GenerateResult, type GeneratedContent, type Provider,
-  GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type GenerateRequest, type GenerateResult, type GeneratedContent,
+  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
@@ -55,12 +55,14 @@ fn do_generate(
 // --- Streaming generation ---
 
 /// Accumulator for streaming state — threaded through a pure receive loop.
-type StreamAccumulator {
+pub opaque type StreamAccumulator {
   StreamAccumulator(
     text: string_tree.StringTree,
     tool_calls: List(StreamingToolCall),
     finish_reason: FinishReason,
     usage: Usage,
+    /// True once a chunk carrying a finish_reason has been seen.
+    finished: Bool,
   )
 }
 
@@ -103,17 +105,19 @@ fn do_stream(
           tool_calls: [],
           finish_reason: error.Stop,
           usage: stream.zero_usage(),
+          finished: False,
         )
 
       // Pure receive loop — state threaded through recursion
-      let final_acc =
-        openai_stream_loop(
-          event_subject,
-          manager_subject,
-          acc,
-          on_event,
-          config.timeout_ms,
-        )
+      use final_acc <- result.try(stream_loop(
+        event_subject,
+        manager_subject,
+        acc,
+        on_event,
+        provider_name,
+        config.model,
+        config.timeout_ms,
+      ))
 
       let text_content = case string_tree.to_string(final_acc.text) {
         "" -> []
@@ -139,38 +143,97 @@ fn do_stream(
   }
 }
 
-fn openai_stream_loop(
+/// Receive SSE events until the stream completes.
+///
+/// Returns an error — never a partial success — when the stream times out,
+/// closes before the provider signalled completion, or carries an error
+/// payload. The SSE client does not expose the HTTP status, so a non-2xx
+/// response (e.g. 401, 429) shows up here as a stream that closes without
+/// ever finishing.
+///
+/// Public only so tests can drive it with hand-made subjects; this module
+/// is internal to the package.
+pub fn stream_loop(
   subject: process.Subject(httpp_sse.SSEEvent),
   manager: process.Subject(httpp_sse.SSEManagerMessage),
   acc: StreamAccumulator,
   on_event: fn(StreamEvent) -> Nil,
+  provider_name: String,
+  model: String,
   timeout_ms: Int,
-) -> StreamAccumulator {
+) -> Result(StreamAccumulator, GleanError) {
   case process.receive(subject, timeout_ms) {
     Error(_) -> {
       process.send(manager, httpp_sse.Shutdown)
-      acc
+      Error(error.Timeout(after_ms: timeout_ms))
     }
-    Ok(httpp_sse.Closed) -> acc
-    Ok(httpp_sse.Event(_event_type, _event_id, data)) -> {
-      case data {
-        "[DONE]" -> {
+    Ok(httpp_sse.Closed) ->
+      case acc.finished {
+        True -> Ok(acc)
+        False ->
+          Error(error.ProviderError(
+            provider: provider_name,
+            model: model,
+            status: 0,
+            message: "Stream closed before the response finished",
+          ))
+      }
+    Ok(httpp_sse.Event(_event_type, _event_id, "[DONE]")) -> {
+      process.send(manager, httpp_sse.Shutdown)
+      Ok(acc)
+    }
+    Ok(httpp_sse.Event(_event_type, _event_id, data)) ->
+      case json.parse(data, stream_error_decoder()) {
+        Ok(message) -> {
           process.send(manager, httpp_sse.Shutdown)
-          acc
+          Error(error.ProviderError(
+            provider: provider_name,
+            model: model,
+            status: 0,
+            message: message,
+          ))
         }
-        _ -> {
-          let new_acc = process_openai_chunk(acc, data, on_event)
-          openai_stream_loop(
+        Error(_) ->
+          stream_loop(
             subject,
             manager,
-            new_acc,
+            process_openai_chunk(acc, data, on_event),
             on_event,
+            provider_name,
+            model,
             timeout_ms,
           )
-        }
       }
-    }
   }
+}
+
+/// Decodes an in-stream error payload: `{"error": {"message": "..."}}`.
+fn stream_error_decoder() -> decode.Decoder(String) {
+  use message <- decode.field("error", {
+    use message <- decode.optional_field(
+      "message",
+      "Unknown streaming error",
+      decode.string,
+    )
+    decode.success(message)
+  })
+  decode.success(message)
+}
+
+/// A fresh accumulator. Public for tests only.
+pub fn new_stream_accumulator() -> StreamAccumulator {
+  StreamAccumulator(
+    text: string_tree.new(),
+    tool_calls: [],
+    finish_reason: error.Stop,
+    usage: stream.zero_usage(),
+    finished: False,
+  )
+}
+
+/// The text accumulated so far. Public for tests only.
+pub fn accumulated_text(acc: StreamAccumulator) -> String {
+  string_tree.to_string(acc.text)
 }
 
 fn process_openai_chunk(
@@ -187,10 +250,7 @@ fn process_openai_chunk(
         "" -> acc
         delta -> {
           on_event(stream.TextDelta(id: chunk.id, delta: delta))
-          StreamAccumulator(
-            ..acc,
-            text: string_tree.append(acc.text, delta),
-          )
+          StreamAccumulator(..acc, text: string_tree.append(acc.text, delta))
         }
       }
 
@@ -204,7 +264,11 @@ fn process_openai_chunk(
       let acc = case chunk.finish_reason {
         "" -> acc
         fr ->
-          StreamAccumulator(..acc, finish_reason: parse_finish_reason(fr))
+          StreamAccumulator(
+            ..acc,
+            finish_reason: parse_finish_reason(fr),
+            finished: True,
+          )
       }
 
       // Process usage (some providers send it in the last chunk)
@@ -383,13 +447,9 @@ fn make_http_request(
   url: String,
   body: String,
 ) -> Result(String, GleanError) {
-  http_utils.send_post(
-    config,
-    provider_name,
-    url,
-    body,
-    [#("authorization", "Bearer " <> config.api_key)],
-  )
+  http_utils.send_post(config, provider_name, url, body, [
+    #("authorization", "Bearer " <> config.api_key),
+  ])
 }
 
 // --- Request encoding ---
@@ -439,14 +499,12 @@ fn encode_request(
 
   let fields = case gen_request.settings.presence_penalty {
     None -> fields
-    Some(pp) ->
-      list.append(fields, [#("presence_penalty", json.float(pp))])
+    Some(pp) -> list.append(fields, [#("presence_penalty", json.float(pp))])
   }
 
   let fields = case gen_request.settings.frequency_penalty {
     None -> fields
-    Some(fp) ->
-      list.append(fields, [#("frequency_penalty", json.float(fp))])
+    Some(fp) -> list.append(fields, [#("frequency_penalty", json.float(fp))])
   }
 
   let fields = case gen_request.settings.stop_sequences {
@@ -495,16 +553,16 @@ fn encode_message(msg: Message) -> List(json.Json) {
         _ -> [
           json.object([
             #("role", json.string("user")),
-            #("content", json.preprocessed_array(
-              list.map(content, encode_user_content),
-            )),
+            #(
+              "content",
+              json.preprocessed_array(list.map(content, encode_user_content)),
+            ),
           ]),
         ]
       }
     message.AssistantMessage(content) -> [encode_assistant_message(content)]
     // Each tool result must be a separate message in OpenAI format
-    message.ToolResultMessage(results) ->
-      list.map(results, encode_tool_result)
+    message.ToolResultMessage(results) -> list.map(results, encode_tool_result)
   }
 }
 
@@ -525,9 +583,7 @@ fn encode_user_content(content: message.UserContent) -> json.Json {
               json.object([
                 #(
                   "url",
-                  json.string(
-                    "data:" <> media_type <> ";base64," <> b64,
-                  ),
+                  json.string("data:" <> media_type <> ";base64," <> b64),
                 ),
               ]),
             ),
@@ -535,10 +591,7 @@ fn encode_user_content(content: message.UserContent) -> json.Json {
         message.UrlData(url) ->
           json.object([
             #("type", json.string("image_url")),
-            #(
-              "image_url",
-              json.object([#("url", json.string(url))]),
-            ),
+            #("image_url", json.object([#("url", json.string(url))])),
           ])
       }
   }
@@ -559,17 +612,19 @@ fn encode_assistant_message(
     list.filter_map(content, fn(c) {
       case c {
         message.AssistantToolCall(id, name, args) ->
-          Ok(json.object([
-            #("id", json.string(id)),
-            #("type", json.string("function")),
-            #(
-              "function",
-              json.object([
-                #("name", json.string(name)),
-                #("arguments", json.string(args)),
-              ]),
-            ),
-          ]))
+          Ok(
+            json.object([
+              #("id", json.string(id)),
+              #("type", json.string("function")),
+              #(
+                "function",
+                json.object([
+                  #("name", json.string(name)),
+                  #("arguments", json.string(args)),
+                ]),
+              ),
+            ]),
+          )
         _ -> Error(Nil)
       }
     })

@@ -1,6 +1,5 @@
 /// Middleware hooks for transforming provider requests and results.
 /// Inspired by Vercel AI SDK's LanguageModelMiddleware.
-
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import glean/error.{type GleanError}
@@ -39,8 +38,14 @@ pub fn result_middleware(
 pub fn chain(middlewares: List(Middleware)) -> Middleware {
   list.fold(middlewares, identity_middleware(), fn(acc, mw) {
     Middleware(
-      transform_request: compose_option(acc.transform_request, mw.transform_request),
-      transform_result: compose_option(acc.transform_result, mw.transform_result),
+      transform_request: compose_option(
+        acc.transform_request,
+        mw.transform_request,
+      ),
+      transform_result: compose_option(
+        acc.transform_result,
+        mw.transform_result,
+      ),
     )
   })
 }
@@ -50,7 +55,10 @@ pub fn apply(provider: Provider, middleware: Middleware) -> Provider {
   let transform_req = middleware.transform_request
   let transform_res = middleware.transform_result
 
-  let new_generate = fn(request: GenerateRequest) -> Result(GenerateResult, GleanError) {
+  let new_generate = fn(request: GenerateRequest) -> Result(
+    GenerateResult,
+    GleanError,
+  ) {
     let request = apply_transform(request, transform_req)
     case provider.generate(request) {
       Ok(result) -> Ok(apply_transform(result, transform_res))
@@ -69,11 +77,7 @@ pub fn apply(provider: Provider, middleware: Middleware) -> Provider {
     }
   }
 
-  Provider(
-    ..provider,
-    generate: new_generate,
-    stream: new_stream,
-  )
+  Provider(..provider, generate: new_generate, stream: new_stream)
 }
 
 // --- Internal helpers ---

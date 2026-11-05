@@ -1,6 +1,5 @@
 /// Model type — the output of per-model builder types.
 /// Bridges type-safe model configuration to the Agent system.
-
 import gleam/io
 import glean/provider.{type ModelSettings, type Provider}
 

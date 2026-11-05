@@ -1,6 +1,5 @@
 /// Agent execution loop.
 /// Pure recursive function — no mutable state.
-
 import gleam/list
 import glean/agent.{type Agent}
 import glean/error.{type FinishReason, type GleanError, MaxStepsExceeded}
@@ -63,14 +62,16 @@ pub fn generate(
   prompt: String,
 ) -> Result(RunResult, GleanError) {
   let messages = build_initial_messages(agent, prompt)
-  run_loop(RunState(
-    agent: agent,
-    deps: deps,
-    messages: messages,
-    step: 0,
-    total_usage: stream.zero_usage(),
-    step_results: [],
-  ))
+  run_loop(
+    RunState(
+      agent: agent,
+      deps: deps,
+      messages: messages,
+      step: 0,
+      total_usage: stream.zero_usage(),
+      step_results: [],
+    ),
+  )
 }
 
 /// Run the agent with pre-built messages (for multi-turn conversations).
@@ -80,14 +81,16 @@ pub fn generate_messages(
   messages: List(Message),
 ) -> Result(RunResult, GleanError) {
   let messages = prepend_system_prompts(agent, messages)
-  run_loop(RunState(
-    agent: agent,
-    deps: deps,
-    messages: messages,
-    step: 0,
-    total_usage: stream.zero_usage(),
-    step_results: [],
-  ))
+  run_loop(
+    RunState(
+      agent: agent,
+      deps: deps,
+      messages: messages,
+      step: 0,
+      total_usage: stream.zero_usage(),
+      step_results: [],
+    ),
+  )
 }
 
 /// Run the agent with streaming. Calls on_event for each StreamEvent.
@@ -119,14 +122,16 @@ pub fn continue(
   prompt: String,
 ) -> Result(RunResult, GleanError) {
   let messages = list.append(previous.messages, [message.user(prompt)])
-  run_loop(RunState(
-    agent: agent,
-    deps: deps,
-    messages: messages,
-    step: 0,
-    total_usage: stream.zero_usage(),
-    step_results: [],
-  ))
+  run_loop(
+    RunState(
+      agent: agent,
+      deps: deps,
+      messages: messages,
+      step: 0,
+      total_usage: stream.zero_usage(),
+      step_results: [],
+    ),
+  )
 }
 
 // --- Internal: message building ---
@@ -204,7 +209,7 @@ fn process_generate_result(
       let text = extract_text(result.content)
       Ok(RunResult(
         text: text,
-        messages: state.messages,
+        messages: append_assistant_message(state.messages, result.content),
         content: result.content,
         usage: new_usage,
         finish_reason: result.finish_reason,
@@ -215,25 +220,8 @@ fn process_generate_result(
     // Tool calls present — execute them and loop
     _ -> {
       // Add assistant message with tool calls
-      let assistant_content =
-        result.content
-        |> list.map(fn(c) {
-          case c {
-            GeneratedToolCall(id, name, args) ->
-              message.AssistantToolCall(
-                tool_call_id: id,
-                tool_name: name,
-                arguments_json: args,
-              )
-            GeneratedText(text) -> message.AssistantText(text)
-            provider.GeneratedReasoning(text) ->
-              message.AssistantReasoning(text)
-          }
-        })
       let messages_with_assistant =
-        list.append(state.messages, [
-          message.AssistantMessage(content: assistant_content),
-        ])
+        append_assistant_message(state.messages, result.content)
 
       // Execute each tool call
       case execute_tool_calls(state, tool_calls) {
@@ -245,13 +233,15 @@ fn process_generate_result(
             ])
 
           // Recurse with updated state
-          run_loop(RunState(
-            ..state,
-            messages: messages_with_results,
-            step: state.step + 1,
-            total_usage: new_usage,
-            step_results: new_step_results,
-          ))
+          run_loop(
+            RunState(
+              ..state,
+              messages: messages_with_results,
+              step: state.step + 1,
+              total_usage: new_usage,
+              step_results: new_step_results,
+            ),
+          )
         }
       }
     }
@@ -319,7 +309,7 @@ fn process_stream_result(
       ))
       Ok(RunResult(
         text: text,
-        messages: state.messages,
+        messages: append_assistant_message(state.messages, result.content),
         content: result.content,
         usage: new_usage,
         finish_reason: result.finish_reason,
@@ -328,25 +318,8 @@ fn process_stream_result(
       ))
     }
     _ -> {
-      let assistant_content =
-        result.content
-        |> list.map(fn(c) {
-          case c {
-            GeneratedToolCall(id, name, args) ->
-              message.AssistantToolCall(
-                tool_call_id: id,
-                tool_name: name,
-                arguments_json: args,
-              )
-            GeneratedText(text) -> message.AssistantText(text)
-            provider.GeneratedReasoning(text) ->
-              message.AssistantReasoning(text)
-          }
-        })
       let messages_with_assistant =
-        list.append(state.messages, [
-          message.AssistantMessage(content: assistant_content),
-        ])
+        append_assistant_message(state.messages, result.content)
 
       case execute_tool_calls_with_events(state, tool_calls, on_event) {
         Error(err) -> Error(err)
@@ -372,6 +345,39 @@ fn process_stream_result(
   }
 }
 
+// --- Internal: history ---
+
+/// Append the model's response to the conversation history, so that
+/// `RunResult.messages` holds the full conversation (including the final
+/// answer) and `continue` sends it back to the model.
+fn append_assistant_message(
+  messages: List(Message),
+  content: List(GeneratedContent),
+) -> List(Message) {
+  case content {
+    [] -> messages
+    _ -> {
+      let assistant_content =
+        list.map(content, fn(c) {
+          case c {
+            GeneratedToolCall(id, name, args) ->
+              message.AssistantToolCall(
+                tool_call_id: id,
+                tool_name: name,
+                arguments_json: args,
+              )
+            GeneratedText(text) -> message.AssistantText(text)
+            provider.GeneratedReasoning(text) ->
+              message.AssistantReasoning(text)
+          }
+        })
+      list.append(messages, [
+        message.AssistantMessage(content: assistant_content),
+      ])
+    }
+  }
+}
+
 // --- Internal: tool execution ---
 
 type PendingToolCall {
@@ -382,7 +388,9 @@ type PendingToolCall {
   )
 }
 
-fn extract_tool_calls(content: List(GeneratedContent)) -> List(PendingToolCall) {
+fn extract_tool_calls(
+  content: List(GeneratedContent),
+) -> List(PendingToolCall) {
   list.filter_map(content, fn(c) {
     case c {
       GeneratedToolCall(id, name, args) ->
@@ -424,8 +432,7 @@ fn execute_tool_calls_loop(
     [call, ..rest] -> {
       case execute_single_tool(state, call) {
         Error(err) -> Error(err)
-        Ok(result) ->
-          execute_tool_calls_loop(state, rest, [result, ..results])
+        Ok(result) -> execute_tool_calls_loop(state, rest, [result, ..results])
       }
     }
   }
@@ -484,8 +491,7 @@ fn execute_single_tool(
 ) -> Result(message.ToolResult, GleanError) {
   case tool.find(state.agent.tools, call.tool_name) {
     Error(err) -> Error(err)
-    Ok(found_tool) ->
-      execute_tool_with_retry(state, call, found_tool, 0)
+    Ok(found_tool) -> execute_tool_with_retry(state, call, found_tool, 0)
   }
 }
 
@@ -525,13 +531,7 @@ fn execute_tool_with_retry(
                 error_message: tool_error_to_string(tool_err),
               ))
             // Retryable errors
-            _ ->
-              execute_tool_with_retry(
-                state,
-                call,
-                found_tool,
-                attempt + 1,
-              )
+            _ -> execute_tool_with_retry(state, call, found_tool, attempt + 1)
           }
         False ->
           // All retries exhausted — return error to model for recovery

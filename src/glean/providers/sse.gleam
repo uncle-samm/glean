@@ -1,6 +1,5 @@
 /// SSE (Server-Sent Events) streaming client.
 /// Wraps the httpp package for clean, native Gleam streaming.
-
 import gleam/bytes_tree
 import gleam/erlang/process
 import gleam/http
@@ -43,8 +42,7 @@ pub fn start_stream(
 
       case httpp_sse.event_source(req, timeout_ms, subject) {
         Error(_) -> Error("Failed to start SSE stream")
-        Ok(#(_client_ref, manager_subject)) ->
-          Ok(#(subject, manager_subject))
+        Ok(#(_client_ref, manager_subject)) -> Ok(#(subject, manager_subject))
       }
     }
   }

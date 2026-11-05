@@ -77,8 +77,7 @@ pub fn top_p(m: MiniMax, p: Float) -> MiniMax {
 
 /// Build a `Model` from this MiniMax configuration.
 pub fn build(m: MiniMax) -> Model {
-  let provider =
-    minimax_provider.new(api_key: m.api_key, model: m.model_id)
+  let provider = minimax_provider.new(api_key: m.api_key, model: m.model_id)
 
   let settings =
     ModelSettings(

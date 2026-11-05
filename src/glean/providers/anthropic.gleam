@@ -1,19 +1,19 @@
 /// Anthropic provider (Claude models).
 /// Uses the Anthropic Messages API format (different from OpenAI).
-
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/string_tree
 import glean/error.{type FinishReason, type GleanError}
 import glean/json_value
 import glean/message.{type Message}
 import glean/provider.{
-  type GenerateRequest, type GenerateResult, type GeneratedContent, type Provider,
-  GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type GenerateRequest, type GenerateResult, type GeneratedContent,
+  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
@@ -117,14 +117,14 @@ fn do_stream(
           current_block_type: "",
         )
 
-      let final_acc =
-        anthropic_stream_loop(
-          event_subject,
-          manager_subject,
-          acc,
-          on_event,
-          config.timeout_ms,
-        )
+      use final_acc <- result.try(anthropic_stream_loop(
+        event_subject,
+        manager_subject,
+        acc,
+        on_event,
+        config.model,
+        config.timeout_ms,
+      ))
 
       let text_content = case string_tree.to_string(final_acc.text) {
         "" -> []
@@ -186,8 +186,7 @@ fn encode_stream_request(
     Some(max) -> max
     None -> 4096
   }
-  let fields =
-    list.append(fields, [#("max_tokens", json.int(max_tokens))])
+  let fields = list.append(fields, [#("max_tokens", json.int(max_tokens))])
 
   let fields = case gen_request.tool_choice {
     provider.NoTools -> fields
@@ -227,37 +226,54 @@ fn encode_stream_request(
   |> json.to_string
 }
 
+/// Receive SSE events until `message_stop`.
+///
+/// Timeouts, `error` events (e.g. `overloaded_error`) and streams that
+/// close before `message_stop` are returned as errors, never as a partial
+/// success. A non-2xx response (401, 429, ...) has no SSE events, and the
+/// SSE client hides its status, so it shows up as an early close.
 fn anthropic_stream_loop(
   subject: process.Subject(httpp_sse.SSEEvent),
   manager: process.Subject(httpp_sse.SSEManagerMessage),
   acc: StreamAccumulator,
   on_event: fn(StreamEvent) -> Nil,
+  model: String,
   timeout_ms: Int,
-) -> StreamAccumulator {
+) -> Result(StreamAccumulator, GleanError) {
   case process.receive(subject, timeout_ms) {
     Error(_) -> {
       process.send(manager, httpp_sse.Shutdown)
-      acc
+      Error(error.Timeout(after_ms: timeout_ms))
     }
-    Ok(httpp_sse.Closed) -> acc
-    Ok(httpp_sse.Event(event_type, _event_id, data)) -> {
-      let new_acc =
-        process_anthropic_event(acc, event_type, data, on_event)
-      case event_type {
-        Some("message_stop") -> {
-          process.send(manager, httpp_sse.Shutdown)
-          new_acc
-        }
-        _ ->
-          anthropic_stream_loop(
-            subject,
-            manager,
-            new_acc,
-            on_event,
-            timeout_ms,
-          )
-      }
+    Ok(httpp_sse.Closed) ->
+      Error(error.ProviderError(
+        provider: "anthropic",
+        model: model,
+        status: 0,
+        message: "Stream closed before message_stop",
+      ))
+    Ok(httpp_sse.Event(Some("error"), _event_id, data)) -> {
+      process.send(manager, httpp_sse.Shutdown)
+      Error(error.ProviderError(
+        provider: "anthropic",
+        model: model,
+        status: 0,
+        message: data,
+      ))
     }
+    Ok(httpp_sse.Event(Some("message_stop"), _event_id, data)) -> {
+      process.send(manager, httpp_sse.Shutdown)
+      Ok(process_anthropic_event(acc, Some("message_stop"), data, on_event))
+    }
+    Ok(httpp_sse.Event(event_type, _event_id, data)) ->
+      anthropic_stream_loop(
+        subject,
+        manager,
+        process_anthropic_event(acc, event_type, data, on_event),
+        on_event,
+        model,
+        timeout_ms,
+      )
   }
 }
 
@@ -273,11 +289,7 @@ fn process_anthropic_event(
         use msg <- decode.field("message", {
           use usage <- decode.field("usage", {
             use input <- decode.field("input_tokens", decode.int)
-            use output <- decode.optional_field(
-              "output_tokens",
-              0,
-              decode.int,
-            )
+            use output <- decode.optional_field("output_tokens", 0, decode.int)
             decode.success(Usage(input_tokens: input, output_tokens: output))
           })
           decode.success(usage)
@@ -305,9 +317,7 @@ fn process_anthropic_event(
         Ok(#(index, #(block_type, id, name))) -> {
           case block_type {
             "text" -> {
-              on_event(stream.TextStart(
-                id: "block_" <> int.to_string(index),
-              ))
+              on_event(stream.TextStart(id: "block_" <> int.to_string(index)))
               StreamAccumulator(
                 ..acc,
                 current_block_index: index,
@@ -321,11 +331,7 @@ fn process_anthropic_event(
                 tool_name: name,
               ))
               let new_tc =
-                StreamingToolCall(
-                  id: id,
-                  name: name,
-                  args: string_tree.new(),
-                )
+                StreamingToolCall(id: id, name: name, args: string_tree.new())
               StreamAccumulator(
                 ..acc,
                 current_block_index: index,
@@ -363,10 +369,7 @@ fn process_anthropic_event(
                 id: "block_" <> int.to_string(index),
                 delta: text,
               ))
-              StreamAccumulator(
-                ..acc,
-                text: string_tree.append(acc.text, text),
-              )
+              StreamAccumulator(..acc, text: string_tree.append(acc.text, text))
             }
             "input_json_delta" -> {
               let tc_id = case list.last(acc.tool_calls) {
@@ -380,10 +383,7 @@ fn process_anthropic_event(
               ))
               StreamAccumulator(
                 ..acc,
-                tool_calls: update_last_tool_call(
-                  acc.tool_calls,
-                  partial_json,
-                ),
+                tool_calls: update_last_tool_call(acc.tool_calls, partial_json),
               )
             }
             _ -> acc
@@ -394,8 +394,7 @@ fn process_anthropic_event(
     }
 
     Some("content_block_stop") -> {
-      let block_id =
-        "block_" <> int.to_string(acc.current_block_index)
+      let block_id = "block_" <> int.to_string(acc.current_block_index)
       case acc.current_block_type {
         "text" -> on_event(stream.TextEnd(id: block_id))
         "tool_use" -> {
@@ -435,11 +434,7 @@ fn process_anthropic_event(
             Usage(0, 0) -> acc.usage
             u -> u
           }
-          StreamAccumulator(
-            ..acc,
-            finish_reason: finish,
-            usage: final_usage,
-          )
+          StreamAccumulator(..acc, finish_reason: finish, usage: final_usage)
         }
         Error(_) -> acc
       }
@@ -474,16 +469,10 @@ fn make_http_request(
   url: String,
   body: String,
 ) -> Result(String, GleanError) {
-  http_utils.send_post(
-    config,
-    "anthropic",
-    url,
-    body,
-    [
-      #("x-api-key", config.api_key),
-      #("anthropic-version", anthropic_version),
-    ],
-  )
+  http_utils.send_post(config, "anthropic", url, body, [
+    #("x-api-key", config.api_key),
+    #("anthropic-version", anthropic_version),
+  ])
 }
 
 // --- Request encoding (Anthropic format) ---
@@ -523,8 +512,7 @@ fn encode_request(model: String, gen_request: GenerateRequest) -> String {
     Some(max) -> max
     None -> 4096
   }
-  let fields =
-    list.append(fields, [#("max_tokens", json.int(max_tokens))])
+  let fields = list.append(fields, [#("max_tokens", json.int(max_tokens))])
 
   // Tools — when NoTools, don't include tools in the request at all
   let fields = case gen_request.tool_choice {
@@ -609,9 +597,7 @@ fn encode_message(msg: Message) -> List(json.Json) {
         #("role", json.string("assistant")),
         #(
           "content",
-          json.preprocessed_array(
-            list.map(content, encode_assistant_content),
-          ),
+          json.preprocessed_array(list.map(content, encode_assistant_content)),
         ),
       ]),
     ]
@@ -825,4 +811,3 @@ fn parse_stop_reason(reason: String) -> FinishReason {
     other -> error.Other(other)
   }
 }
-

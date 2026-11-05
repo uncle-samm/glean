@@ -15,7 +15,11 @@ pub fn tool_call_simulation_test() {
   simulation.new("calculator", "What is 2 + 3?")
   |> simulation.then_call_tools([
     ScriptedToolExecution(
-      call: ScriptedToolCall(id: "c1", name: "add", arguments: "{\"a\":2,\"b\":3}"),
+      call: ScriptedToolCall(
+        id: "c1",
+        name: "add",
+        arguments: "{\"a\":2,\"b\":3}",
+      ),
       result: ToolSuccess(content: "5"),
     ),
   ])

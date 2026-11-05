@@ -1,6 +1,5 @@
 /// Tool definition, toolset, and execution context.
 /// Generic over `deps` for dependency injection (from Pydantic AI's RunContext pattern).
-
 import gleam/dict.{type Dict}
 import gleam/list
 import glean/error.{type GleanError, ToolNotFound}
