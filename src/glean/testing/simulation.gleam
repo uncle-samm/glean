@@ -1,6 +1,5 @@
 /// Deterministic simulation engine for testing multi-step agent workflows.
 /// Script each step and assert at each point — pure functions, no external calls.
-
 import gleam/int
 import gleam/list
 import gleam/string
@@ -24,10 +23,7 @@ pub type SimulationStep {
 
 /// Describes a tool call and its expected result.
 pub type ScriptedToolExecution {
-  ScriptedToolExecution(
-    call: ScriptedToolCall,
-    result: ToolExecutionResult,
-  )
+  ScriptedToolExecution(call: ScriptedToolCall, result: ToolExecutionResult)
 }
 
 /// What happens when a tool is executed.
@@ -66,9 +62,7 @@ pub opaque type Simulation {
     system_prompt: String,
     steps: List(SimulationStep),
     max_steps: Int,
-    final_assertions: List(
-      fn(SimulationState) -> Result(Nil, AssertionError),
-    ),
+    final_assertions: List(fn(SimulationState) -> Result(Nil, AssertionError)),
   )
 }
 
@@ -129,8 +123,7 @@ pub fn then_call_tools(
   sim: Simulation,
   executions: List(ScriptedToolExecution),
 ) -> Simulation {
-  let step =
-    ExpectToolCalls(executions: executions, then_assert: NoAssert)
+  let step = ExpectToolCalls(executions: executions, then_assert: NoAssert)
   Simulation(..sim, steps: list.append(sim.steps, [step]))
 }
 
@@ -189,23 +182,23 @@ pub fn assert_passed(result: SimulationResult) -> SimulationState {
     SimulationPassed(_, state) -> state
     SimulationFailed(name, step, err) ->
       panic as string.concat([
-        "Simulation '",
-        name,
-        "' failed at step ",
-        int.to_string(step),
-        ": expected ",
-        err.expected,
-        " but got ",
-        err.got,
-      ])
+          "Simulation '",
+          name,
+          "' failed at step ",
+          int.to_string(step),
+          ": expected ",
+          err.expected,
+          " but got ",
+          err.got,
+        ])
     SimulationExceededMaxSteps(name, max, _) ->
       panic as string.concat([
-        "Simulation '",
-        name,
-        "' exceeded max steps (",
-        int.to_string(max),
-        ")",
-      ])
+          "Simulation '",
+          name,
+          "' exceeded max steps (",
+          int.to_string(max),
+          ")",
+        ])
   }
 }
 
@@ -333,11 +326,7 @@ fn run_final_assertions(
       case assertion(state) {
         Ok(Nil) -> run_final_assertions(sim, state, rest)
         Error(err) ->
-          SimulationFailed(
-            name: sim.name,
-            step: state.step_count,
-            error: err,
-          )
+          SimulationFailed(name: sim.name, step: state.step_count, error: err)
       }
   }
 }

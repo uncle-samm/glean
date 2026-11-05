@@ -161,8 +161,7 @@ pub fn build(m: Gemini) -> Model {
     }
   }
 
-  let provider =
-    gemini_provider.new(api_key: m.api_key, model: actual_model_id)
+  let provider = gemini_provider.new(api_key: m.api_key, model: actual_model_id)
 
   let settings =
     ModelSettings(

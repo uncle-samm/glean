@@ -1,6 +1,5 @@
 /// Google Gemini provider (gemini-2.5-pro, gemini-2.5-flash, etc.)
 /// Uses the Gemini REST API format (different from OpenAI).
-
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
@@ -14,8 +13,8 @@ import glean/error.{type FinishReason, type GleanError}
 import glean/json_value
 import glean/message.{type Message}
 import glean/provider.{
-  type GenerateRequest, type GenerateResult, type GeneratedContent, type Provider,
-  GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type GenerateRequest, type GenerateResult, type GeneratedContent,
+  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
@@ -60,11 +59,7 @@ fn do_generate(
   gen_request: GenerateRequest,
 ) -> Result(GenerateResult, GleanError) {
   let body = encode_request(gen_request)
-  let url =
-    config.base_url
-    <> "/models/"
-    <> config.model
-    <> ":generateContent"
+  let url = config.base_url <> "/models/" <> config.model <> ":generateContent"
 
   case make_http_request(config, url, body) {
     Error(err) -> Error(err)
@@ -265,18 +260,11 @@ fn process_gemini_chunk(
                 tool_call_id: id,
                 delta: args,
               ))
-              on_event(stream.ToolCallEnd(
-                id: "gemini",
-                tool_call_id: id,
-              ))
+              on_event(stream.ToolCallEnd(id: "gemini", tool_call_id: id))
               GeminiStreamAccumulator(
                 ..a,
                 tool_calls: list.append(a.tool_calls, [
-                  GeminiStreamToolCall(
-                    id: id,
-                    name: name,
-                    args_json: args,
-                  ),
+                  GeminiStreamToolCall(id: id, name: name, args_json: args),
                 ]),
               )
             }
@@ -317,11 +305,7 @@ fn gemini_chunk_decoder() -> decode.Decoder(GeminiChunk) {
 
   let candidate_decoder = {
     use content <- decode.optional_field("content", [], {
-      use parts <- decode.optional_field(
-        "parts",
-        [],
-        decode.list(part_decoder),
-      )
+      use parts <- decode.optional_field("parts", [], decode.list(part_decoder))
       decode.success(parts)
     })
     use finish_reason <- decode.optional_field(
@@ -470,9 +454,7 @@ fn encode_request(gen_request: GenerateRequest) -> String {
   |> json.to_string
 }
 
-fn split_system(
-  messages: List(Message),
-) -> #(List(String), List(Message)) {
+fn split_system(messages: List(Message)) -> #(List(String), List(Message)) {
   let system =
     list.filter_map(messages, fn(m) {
       case m {
@@ -502,10 +484,7 @@ fn encode_content(msg: Message) -> List(json.Json) {
     message.UserMessage(content) -> [
       json.object([
         #("role", json.string("user")),
-        #(
-          "parts",
-          json.preprocessed_array(list.map(content, encode_user_part)),
-        ),
+        #("parts", json.preprocessed_array(list.map(content, encode_user_part))),
       ]),
     ]
     message.AssistantMessage(content) -> [
@@ -522,9 +501,7 @@ fn encode_content(msg: Message) -> List(json.Json) {
         #("role", json.string("user")),
         #(
           "parts",
-          json.preprocessed_array(
-            list.map(results, encode_function_response),
-          ),
+          json.preprocessed_array(list.map(results, encode_function_response)),
         ),
       ]),
     ]
@@ -596,10 +573,7 @@ fn encode_function_response(result: message.ToolResult) -> json.Json {
           "functionResponse",
           json.object([
             #("name", json.string(tool_name)),
-            #(
-              "response",
-              json.object([#("result", json.string(output))]),
-            ),
+            #("response", json.object([#("result", json.string(output))])),
           ]),
         ),
       ])
@@ -609,10 +583,7 @@ fn encode_function_response(result: message.ToolResult) -> json.Json {
           "functionResponse",
           json.object([
             #("name", json.string(tool_name)),
-            #(
-              "response",
-              json.object([#("error", json.string(error_message))]),
-            ),
+            #("response", json.object([#("error", json.string(error_message))])),
           ]),
         ),
       ])
@@ -728,8 +699,7 @@ fn function_call_part_decoder() -> decode.Decoder(GeneratedContent) {
   // Encode thoughtSignature in tool_call_id for round-tripping.
   // Use random suffix to avoid duplicate IDs when same tool is called twice.
   let tool_call_id = case thought_sig {
-    "" ->
-      "gemini_tc_" <> fc.0 <> "_" <> int.to_string(int.random(999_999_999))
+    "" -> "gemini_tc_" <> fc.0 <> "_" <> int.to_string(int.random(999_999_999))
     sig -> "gemini_sig:" <> sig
   }
   decode.success(GeneratedToolCall(
@@ -748,4 +718,3 @@ fn parse_gemini_finish_reason(reason: String) -> FinishReason {
     other -> error.Other(other)
   }
 }
-

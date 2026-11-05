@@ -1,5 +1,4 @@
 /// Provider configuration types shared across all provider implementations.
-
 import gleam/http.{type Header}
 
 /// Configuration for creating a provider.

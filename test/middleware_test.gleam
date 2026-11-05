@@ -1,7 +1,9 @@
 import gleam/option.{Some}
 import glean/agent
 import glean/middleware
-import glean/provider.{GenerateRequest, GenerateResult, GeneratedText, ModelSettings}
+import glean/provider.{
+  GenerateRequest, GenerateResult, GeneratedText, ModelSettings,
+}
 import glean/run
 import glean/testing/function_provider
 import glean/testing/provider as test_provider
@@ -92,8 +94,7 @@ pub fn chain_middleware_order_test() {
 
 pub fn apply_middleware_preserves_provider_test() {
   // Middleware shouldn't change provider name/model_id
-  let mw =
-    middleware.result_middleware(fn(r: provider.GenerateResult) { r })
+  let mw = middleware.result_middleware(fn(r: provider.GenerateResult) { r })
   let p = test_provider.test_provider([test_provider.TextResponse("Hi")])
   let wrapped = middleware.apply(p, mw)
 

@@ -3,8 +3,8 @@ import glean/agent
 import glean/run
 import glean/schema
 import glean/stream
-import glean/tool
 import glean/testing/provider.{ScriptedToolCall, TextResponse, ToolCallResponse}
+import glean/tool
 import gleeunit/should
 
 pub fn collect_text_test() {
@@ -80,10 +80,9 @@ pub fn stream_with_tool_calls_test() {
     tool.new(
       name: "add",
       description: "Add",
-      input_schema: schema.object(
-        properties: [#("a", schema.int())],
-        required: ["a"],
-      ),
+      input_schema: schema.object(properties: [#("a", schema.int())], required: [
+        "a",
+      ]),
       execute: fn(_ctx, _args) { Ok("1") },
     )
 

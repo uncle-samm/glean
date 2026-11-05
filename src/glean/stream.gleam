@@ -1,6 +1,5 @@
 /// Streaming event types.
 /// Follows the start/delta/end pattern from Vercel AI SDK.
-
 import gleam/list
 import gleam/string_tree
 import glean/error.{type FinishReason}

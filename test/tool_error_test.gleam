@@ -3,9 +3,9 @@ import glean/agent
 import glean/error
 import glean/run
 import glean/schema
-import glean/tool
 import glean/testing/function_provider
 import glean/testing/provider.{ScriptedToolCall, TextResponse, ToolCallResponse}
+import glean/tool
 import gleeunit/should
 
 pub fn tool_execution_error_non_fatal_test() {
@@ -55,11 +55,7 @@ pub fn tool_not_found_is_fatal_test() {
   let p =
     provider.test_provider([
       ToolCallResponse([
-        ScriptedToolCall(
-          id: "c1",
-          name: "nonexistent_tool",
-          arguments: "{}",
-        ),
+        ScriptedToolCall(id: "c1", name: "nonexistent_tool", arguments: "{}"),
       ]),
     ])
 
@@ -138,8 +134,7 @@ pub fn tool_error_message_content_test() {
       // First call: return tool call
       // Second call: check that tool error message is in the messages
       case list.length(request.messages) {
-        n if n <= 2 ->
-          Ok(provider.tool_call_result([#("c1", "err_tool", "{}")]))
+        n if n <= 2 -> Ok(provider.tool_call_result([#("c1", "err_tool", "{}")]))
         _ -> Ok(provider.text_result("Done"))
       }
     })

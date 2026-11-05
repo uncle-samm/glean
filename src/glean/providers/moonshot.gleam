@@ -1,6 +1,5 @@
 /// Moonshot / Kimi provider (kimi-k2.5, kimi-k2, etc.)
 /// Fully OpenAI-compatible API.
-
 import glean/provider.{type Provider}
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/openai_compatible

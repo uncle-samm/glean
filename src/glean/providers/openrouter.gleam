@@ -1,6 +1,5 @@
 /// OpenRouter provider — routes to any model via unified API.
 /// Fully OpenAI-compatible API.
-
 import glean/provider.{type Provider}
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/openai_compatible

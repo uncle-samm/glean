@@ -1,6 +1,5 @@
 /// JSON Schema builder for tool input/output definitions.
 /// Opaque type with explicit builder functions — no macros, no reflection.
-
 import gleam/dict.{type Dict}
 import gleam/json.{type Json}
 import gleam/list
@@ -98,8 +97,7 @@ pub fn one_of(variants variants: List(Schema)) -> Schema {
 pub fn describe(schema: Schema, description description: String) -> Schema {
   case schema {
     ObjectSchema(p, r, _) -> ObjectSchema(p, r, Some(description))
-    StringSchema(_, e, mn, mx) ->
-      StringSchema(Some(description), e, mn, mx)
+    StringSchema(_, e, mn, mx) -> StringSchema(Some(description), e, mn, mx)
     IntSchema(_, mn, mx) -> IntSchema(Some(description), mn, mx)
     FloatSchema(_) -> FloatSchema(Some(description))
     BoolSchema(_) -> BoolSchema(Some(description))
@@ -282,10 +280,7 @@ fn nullable_to_json(inner: Schema) -> Json {
   ])
 }
 
-fn one_of_to_json(
-  variants: List(Schema),
-  description: Option(String),
-) -> Json {
+fn one_of_to_json(variants: List(Schema), description: Option(String)) -> Json {
   let variant_jsons = list.map(variants, to_json)
   [#("oneOf", json.preprocessed_array(variant_jsons))]
   |> with_description(description)
@@ -338,10 +333,7 @@ fn array_to_json_strict(items: Schema, description: Option(String)) -> Json {
 
 fn nullable_to_json_strict(inner: Schema) -> Json {
   json.object([
-    #(
-      "oneOf",
-      json.preprocessed_array([to_json_strict(inner), type_null()]),
-    ),
+    #("oneOf", json.preprocessed_array([to_json_strict(inner), type_null()])),
   ])
 }
 

@@ -175,8 +175,7 @@ pub fn build(m: Gpt) -> Model {
     }
   }
 
-  let provider =
-    openai_provider.new(api_key: m.api_key, model: actual_model_id)
+  let provider = openai_provider.new(api_key: m.api_key, model: actual_model_id)
 
   let settings =
     ModelSettings(

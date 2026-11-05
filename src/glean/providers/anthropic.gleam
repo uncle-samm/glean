@@ -1,6 +1,5 @@
 /// Anthropic provider (Claude models).
 /// Uses the Anthropic Messages API format (different from OpenAI).
-
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
@@ -13,8 +12,8 @@ import glean/error.{type FinishReason, type GleanError}
 import glean/json_value
 import glean/message.{type Message}
 import glean/provider.{
-  type GenerateRequest, type GenerateResult, type GeneratedContent, type Provider,
-  GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type GenerateRequest, type GenerateResult, type GeneratedContent,
+  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
@@ -187,8 +186,7 @@ fn encode_stream_request(
     Some(max) -> max
     None -> 4096
   }
-  let fields =
-    list.append(fields, [#("max_tokens", json.int(max_tokens))])
+  let fields = list.append(fields, [#("max_tokens", json.int(max_tokens))])
 
   let fields = case gen_request.tool_choice {
     provider.NoTools -> fields
@@ -291,11 +289,7 @@ fn process_anthropic_event(
         use msg <- decode.field("message", {
           use usage <- decode.field("usage", {
             use input <- decode.field("input_tokens", decode.int)
-            use output <- decode.optional_field(
-              "output_tokens",
-              0,
-              decode.int,
-            )
+            use output <- decode.optional_field("output_tokens", 0, decode.int)
             decode.success(Usage(input_tokens: input, output_tokens: output))
           })
           decode.success(usage)
@@ -323,9 +317,7 @@ fn process_anthropic_event(
         Ok(#(index, #(block_type, id, name))) -> {
           case block_type {
             "text" -> {
-              on_event(stream.TextStart(
-                id: "block_" <> int.to_string(index),
-              ))
+              on_event(stream.TextStart(id: "block_" <> int.to_string(index)))
               StreamAccumulator(
                 ..acc,
                 current_block_index: index,
@@ -339,11 +331,7 @@ fn process_anthropic_event(
                 tool_name: name,
               ))
               let new_tc =
-                StreamingToolCall(
-                  id: id,
-                  name: name,
-                  args: string_tree.new(),
-                )
+                StreamingToolCall(id: id, name: name, args: string_tree.new())
               StreamAccumulator(
                 ..acc,
                 current_block_index: index,
@@ -381,10 +369,7 @@ fn process_anthropic_event(
                 id: "block_" <> int.to_string(index),
                 delta: text,
               ))
-              StreamAccumulator(
-                ..acc,
-                text: string_tree.append(acc.text, text),
-              )
+              StreamAccumulator(..acc, text: string_tree.append(acc.text, text))
             }
             "input_json_delta" -> {
               let tc_id = case list.last(acc.tool_calls) {
@@ -398,10 +383,7 @@ fn process_anthropic_event(
               ))
               StreamAccumulator(
                 ..acc,
-                tool_calls: update_last_tool_call(
-                  acc.tool_calls,
-                  partial_json,
-                ),
+                tool_calls: update_last_tool_call(acc.tool_calls, partial_json),
               )
             }
             _ -> acc
@@ -412,8 +394,7 @@ fn process_anthropic_event(
     }
 
     Some("content_block_stop") -> {
-      let block_id =
-        "block_" <> int.to_string(acc.current_block_index)
+      let block_id = "block_" <> int.to_string(acc.current_block_index)
       case acc.current_block_type {
         "text" -> on_event(stream.TextEnd(id: block_id))
         "tool_use" -> {
@@ -453,11 +434,7 @@ fn process_anthropic_event(
             Usage(0, 0) -> acc.usage
             u -> u
           }
-          StreamAccumulator(
-            ..acc,
-            finish_reason: finish,
-            usage: final_usage,
-          )
+          StreamAccumulator(..acc, finish_reason: finish, usage: final_usage)
         }
         Error(_) -> acc
       }
@@ -492,16 +469,10 @@ fn make_http_request(
   url: String,
   body: String,
 ) -> Result(String, GleanError) {
-  http_utils.send_post(
-    config,
-    "anthropic",
-    url,
-    body,
-    [
-      #("x-api-key", config.api_key),
-      #("anthropic-version", anthropic_version),
-    ],
-  )
+  http_utils.send_post(config, "anthropic", url, body, [
+    #("x-api-key", config.api_key),
+    #("anthropic-version", anthropic_version),
+  ])
 }
 
 // --- Request encoding (Anthropic format) ---
@@ -541,8 +512,7 @@ fn encode_request(model: String, gen_request: GenerateRequest) -> String {
     Some(max) -> max
     None -> 4096
   }
-  let fields =
-    list.append(fields, [#("max_tokens", json.int(max_tokens))])
+  let fields = list.append(fields, [#("max_tokens", json.int(max_tokens))])
 
   // Tools — when NoTools, don't include tools in the request at all
   let fields = case gen_request.tool_choice {
@@ -627,9 +597,7 @@ fn encode_message(msg: Message) -> List(json.Json) {
         #("role", json.string("assistant")),
         #(
           "content",
-          json.preprocessed_array(
-            list.map(content, encode_assistant_content),
-          ),
+          json.preprocessed_array(list.map(content, encode_assistant_content)),
         ),
       ]),
     ]
@@ -843,4 +811,3 @@ fn parse_stop_reason(reason: String) -> FinishReason {
     other -> error.Other(other)
   }
 }
-

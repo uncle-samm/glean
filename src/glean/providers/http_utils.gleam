@@ -1,6 +1,5 @@
 /// Shared HTTP request utilities with timeout and retry logic.
 /// Used by all provider implementations.
-
 import gleam/erlang/process
 import gleam/http
 import gleam/http/request
@@ -33,9 +32,7 @@ pub fn send_post(
         |> request.set_header("content-type", "application/json")
         |> request.set_body(body)
         |> apply_headers(extra_headers)
-        |> apply_headers(
-          list.map(config.headers, fn(h) { #(h.0, h.1) }),
-        )
+        |> apply_headers(list.map(config.headers, fn(h) { #(h.0, h.1) }))
 
       send_with_retry(
         req,

@@ -1,12 +1,11 @@
 /// Scripted test provider for deterministic testing.
 /// Returns predetermined responses in sequence — no real API calls.
-
 import gleam/list
 import glean/error.{type GleanError}
 import glean/message
 import glean/provider.{
-  type GenerateRequest, type GenerateResult, type Provider,
-  GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type GenerateRequest, type GenerateResult, type Provider, GenerateResult,
+  GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/stream.{type StreamEvent, Usage}
 
@@ -91,11 +90,7 @@ pub fn tool_call_result(
 ) -> GenerateResult {
   let content =
     list.map(calls, fn(c) {
-      GeneratedToolCall(
-        tool_call_id: c.0,
-        tool_name: c.1,
-        arguments_json: c.2,
-      )
+      GeneratedToolCall(tool_call_id: c.0, tool_name: c.1, arguments_json: c.2)
     })
   GenerateResult(
     content: content,

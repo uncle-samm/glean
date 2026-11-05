@@ -1,6 +1,5 @@
 /// Shared implementation for all OpenAI-compatible providers.
 /// OpenAI, DeepSeek, Mistral, OpenRouter, Moonshot/Kimi, Qwen, MiniMax all use this format.
-
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/json
@@ -12,8 +11,8 @@ import gleam/string_tree
 import glean/error.{type FinishReason, type GleanError}
 import glean/message.{type Message}
 import glean/provider.{
-  type GenerateRequest, type GenerateResult, type GeneratedContent, type Provider,
-  GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type GenerateRequest, type GenerateResult, type GeneratedContent,
+  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
@@ -251,10 +250,7 @@ fn process_openai_chunk(
         "" -> acc
         delta -> {
           on_event(stream.TextDelta(id: chunk.id, delta: delta))
-          StreamAccumulator(
-            ..acc,
-            text: string_tree.append(acc.text, delta),
-          )
+          StreamAccumulator(..acc, text: string_tree.append(acc.text, delta))
         }
       }
 
@@ -451,13 +447,9 @@ fn make_http_request(
   url: String,
   body: String,
 ) -> Result(String, GleanError) {
-  http_utils.send_post(
-    config,
-    provider_name,
-    url,
-    body,
-    [#("authorization", "Bearer " <> config.api_key)],
-  )
+  http_utils.send_post(config, provider_name, url, body, [
+    #("authorization", "Bearer " <> config.api_key),
+  ])
 }
 
 // --- Request encoding ---
@@ -507,14 +499,12 @@ fn encode_request(
 
   let fields = case gen_request.settings.presence_penalty {
     None -> fields
-    Some(pp) ->
-      list.append(fields, [#("presence_penalty", json.float(pp))])
+    Some(pp) -> list.append(fields, [#("presence_penalty", json.float(pp))])
   }
 
   let fields = case gen_request.settings.frequency_penalty {
     None -> fields
-    Some(fp) ->
-      list.append(fields, [#("frequency_penalty", json.float(fp))])
+    Some(fp) -> list.append(fields, [#("frequency_penalty", json.float(fp))])
   }
 
   let fields = case gen_request.settings.stop_sequences {
@@ -563,16 +553,16 @@ fn encode_message(msg: Message) -> List(json.Json) {
         _ -> [
           json.object([
             #("role", json.string("user")),
-            #("content", json.preprocessed_array(
-              list.map(content, encode_user_content),
-            )),
+            #(
+              "content",
+              json.preprocessed_array(list.map(content, encode_user_content)),
+            ),
           ]),
         ]
       }
     message.AssistantMessage(content) -> [encode_assistant_message(content)]
     // Each tool result must be a separate message in OpenAI format
-    message.ToolResultMessage(results) ->
-      list.map(results, encode_tool_result)
+    message.ToolResultMessage(results) -> list.map(results, encode_tool_result)
   }
 }
 
@@ -593,9 +583,7 @@ fn encode_user_content(content: message.UserContent) -> json.Json {
               json.object([
                 #(
                   "url",
-                  json.string(
-                    "data:" <> media_type <> ";base64," <> b64,
-                  ),
+                  json.string("data:" <> media_type <> ";base64," <> b64),
                 ),
               ]),
             ),
@@ -603,10 +591,7 @@ fn encode_user_content(content: message.UserContent) -> json.Json {
         message.UrlData(url) ->
           json.object([
             #("type", json.string("image_url")),
-            #(
-              "image_url",
-              json.object([#("url", json.string(url))]),
-            ),
+            #("image_url", json.object([#("url", json.string(url))])),
           ])
       }
   }
@@ -627,17 +612,19 @@ fn encode_assistant_message(
     list.filter_map(content, fn(c) {
       case c {
         message.AssistantToolCall(id, name, args) ->
-          Ok(json.object([
-            #("id", json.string(id)),
-            #("type", json.string("function")),
-            #(
-              "function",
-              json.object([
-                #("name", json.string(name)),
-                #("arguments", json.string(args)),
-              ]),
-            ),
-          ]))
+          Ok(
+            json.object([
+              #("id", json.string(id)),
+              #("type", json.string("function")),
+              #(
+                "function",
+                json.object([
+                  #("name", json.string(name)),
+                  #("arguments", json.string(args)),
+                ]),
+              ),
+            ]),
+          )
         _ -> Error(Nil)
       }
     })

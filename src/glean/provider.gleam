@@ -1,7 +1,6 @@
 /// Provider abstraction.
 /// A record with function fields — Gleam's idiomatic replacement for interfaces.
 /// Any library can create a Provider value without modifying this module.
-
 import gleam/option.{type Option, None}
 import glean/error.{type FinishReason, type GleanError}
 import glean/message.{type Message}
@@ -112,7 +111,10 @@ pub fn result_text(result: GenerateResult) -> String {
   |> collect_text_content("")
 }
 
-fn collect_text_content(content: List(GeneratedContent), acc: String) -> String {
+fn collect_text_content(
+  content: List(GeneratedContent),
+  acc: String,
+) -> String {
   case content {
     [] -> acc
     [GeneratedText(text), ..rest] -> collect_text_content(rest, acc <> text)

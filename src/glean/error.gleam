@@ -1,25 +1,15 @@
 /// All error types for the glean SDK.
 /// Every error is explicitly typed and must be handled — never silently swallowed.
-
 import gleam/int
 import gleam/string
 
 pub type GleanError {
   /// Provider returned a non-200 status or network failure
-  ProviderError(
-    provider: String,
-    model: String,
-    status: Int,
-    message: String,
-  )
+  ProviderError(provider: String, model: String, status: Int, message: String)
   /// Tool call referenced a tool name not in the toolset
   ToolNotFound(tool_name: String)
   /// Tool execution returned an error
-  ToolExecutionError(
-    tool_name: String,
-    tool_call_id: String,
-    reason: String,
-  )
+  ToolExecutionError(tool_name: String, tool_call_id: String, reason: String)
   /// Tool input failed schema validation
   ToolInputValidationError(
     tool_name: String,

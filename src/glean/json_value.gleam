@@ -1,6 +1,5 @@
 /// Pure Gleam JSON value type for encoding/decoding arbitrary JSON.
 /// Replaces Erlang FFI for dynamic-to-JSON-string conversion.
-
 import gleam/dict
 import gleam/dynamic/decode
 import gleam/json

@@ -42,9 +42,11 @@ fn data(json: String) -> httpp_sse.SSEEvent {
   httpp_sse.Event(event_type: None, event_id: None, data: json)
 }
 
-const text_chunk = "{\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}"
+const text_chunk =
+  "{\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}"
 
-const finish_chunk = "{\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}"
+const finish_chunk =
+  "{\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}"
 
 pub fn done_marker_completes_stream_test() {
   let assert Ok(acc) = run_events([data(text_chunk), data("[DONE]")])

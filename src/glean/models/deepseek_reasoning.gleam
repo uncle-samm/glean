@@ -49,8 +49,7 @@ pub fn max_output_tokens(m: DeepseekReasoning, n: Int) -> DeepseekReasoning {
 
 /// Build a `Model` from this DeepSeek Reasoning configuration.
 pub fn build(m: DeepseekReasoning) -> Model {
-  let provider =
-    deepseek_provider.new(api_key: m.api_key, model: m.model_id)
+  let provider = deepseek_provider.new(api_key: m.api_key, model: m.model_id)
 
   let settings =
     ModelSettings(

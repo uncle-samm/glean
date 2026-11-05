@@ -1,6 +1,5 @@
 /// Agent configuration (builder pattern).
 /// Immutable config — running an agent produces a RunResult; the agent is reusable.
-
 import glean/model.{type Model}
 import glean/provider.{type ModelSettings, type Provider, type ToolChoice}
 import glean/tool.{type Toolset}
@@ -49,10 +48,7 @@ pub fn tools(agent: Agent(deps), tools: Toolset(deps)) -> Agent(deps) {
 }
 
 /// Set model settings.
-pub fn settings(
-  agent: Agent(deps),
-  settings: ModelSettings,
-) -> Agent(deps) {
+pub fn settings(agent: Agent(deps), settings: ModelSettings) -> Agent(deps) {
   Agent(..agent, settings: settings)
 }
 

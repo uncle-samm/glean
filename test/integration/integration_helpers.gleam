@@ -1,5 +1,4 @@
 /// Shared utilities for provider integration tests.
-
 import envoy
 import gleam/option.{None, Some}
 import gleam/string
