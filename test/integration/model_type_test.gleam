@@ -1,5 +1,5 @@
 import glean/agent
-import glean/models/anthropic as anthropic_model
+import glean/models/anthropic_sampling as anthropic_model
 import glean/models/gemini as gemini_model
 import glean/models/mistral as mistral_model
 import glean/models/openai_reasoning
@@ -83,7 +83,7 @@ pub fn model_type_mistral_test() {
     Error(Nil) -> Nil
     Ok(api_key) -> {
       let model =
-        mistral_model.small_3_2(api_key: api_key)
+        mistral_model.small_4(api_key: api_key)
         |> mistral_model.max_output_tokens(1000)
         |> mistral_model.temperature(0.3)
         |> mistral_model.build

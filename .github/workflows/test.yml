@@ -14,13 +14,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: "28"
+          otp-version: "29"
           gleam-version: "1.19.1"
           rebar3-version: "3"
-          # elixir-version: "1"
+      # TEMPORARY: print what `gleam add` / `gleam update` change, so the
+      # result can be committed. Removed before merge.
+      - name: Dependency update preview
+        run: |
+          gleam add --dev gleam_time
+          gleam update
+          git diff gleam.toml manifest.toml
       - run: gleam deps download
       - run: gleam test
       - run: gleam format --check src test
+      - name: Benchmarks
+        run: gleam run -m glean_bench
       - name: Show formatting diff
         if: failure()
-        run: gleam format src test && git diff
+        run: gleam format src test && git diff -- src test

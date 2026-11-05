@@ -1,109 +1,89 @@
 //// MiniMax models.
 ////
-//// Covers MiniMax M2.5, M2.1, M2, and M1.
-//// Supported parameters: max_output_tokens, temperature, top_p.
-////
-//// NO top_k, NO seed, NO penalty parameters.
-
-import gleam/option.{type Option, None, Some}
+//// MiniMax documents `temperature` and `top_p` as having no effect, so this
+//// builder doesn't offer them.
+import gleam/option.{Some}
 import glean/model.{type Model, Model}
-import glean/provider.{ModelSettings}
+import glean/provider.{type ModelSettings, ModelSettings}
+import glean/providers/config.{type ProviderConfig}
 import glean/providers/minimax as minimax_provider
 
-/// A MiniMax model builder.
-/// Use one of the constructor functions to create a value, chain builder
-/// functions to set parameters, then call `build()` to get a `Model`.
+/// A MiniMax model builder. Pick a model with one of the constructors
+/// (or `custom`), chain setters, then call `build()`.
 pub opaque type MiniMax {
-  MiniMax(
-    api_key: String,
-    model_id: String,
-    max_output_tokens: Option(Int),
-    temperature: Option(Float),
-    top_p: Option(Float),
-  )
+  MiniMax(config: ProviderConfig, settings: ModelSettings)
 }
 
 // ---------------------------------------------------------------------------
 // Constructors
 // ---------------------------------------------------------------------------
 
-/// MiniMax M2.5
+/// MiniMax M3. Model ID: `MiniMax-M3`.
+pub fn m3(api_key key: String) -> MiniMax {
+  new(key, "MiniMax-M3")
+}
+
+/// MiniMax M3.1 Flash. Model ID: `MiniMax-M3.1-Flash`.
+pub fn m3_1_flash(api_key key: String) -> MiniMax {
+  new(key, "MiniMax-M3.1-Flash")
+}
+
+/// MiniMax M2.7. Model ID: `MiniMax-M2.7`.
+@deprecated("MiniMax-M2.7 retires for pay-as-you-go on Nov 18, 2026. Use minimax.m3() instead.")
+pub fn m2_7(api_key key: String) -> MiniMax {
+  new(key, "MiniMax-M2.7")
+}
+
+/// MiniMax M2.5. Model ID: `MiniMax-M2.5`.
+@deprecated("MiniMax-M2.5 retires for pay-as-you-go on Nov 18, 2026. Use minimax.m3() instead.")
 pub fn m2_5(api_key key: String) -> MiniMax {
-  new_minimax(key, "MiniMax-M2.5")
+  new(key, "MiniMax-M2.5")
 }
 
-/// MiniMax M2.1
-pub fn m2_1(api_key key: String) -> MiniMax {
-  new_minimax(key, "MiniMax-M2.1")
-}
-
-/// MiniMax M2.1 Lightning
-pub fn m2_1_lightning(api_key key: String) -> MiniMax {
-  new_minimax(key, "MiniMax-M2.1-lightning")
-}
-
-/// MiniMax M2
-pub fn m2(api_key key: String) -> MiniMax {
-  new_minimax(key, "MiniMax-M2")
-}
-
-/// MiniMax M1
-pub fn m1(api_key key: String) -> MiniMax {
-  new_minimax(key, "MiniMax-M1")
+/// Any other model ID served by this API, such as one released after this
+/// version of glean. Only this module's setters are available, so check the
+/// model accepts them.
+pub fn custom(api_key key: String, model model_id: String) -> MiniMax {
+  let assert True = model_id != ""
+  new(key, model_id)
 }
 
 // ---------------------------------------------------------------------------
-// Builder functions
+// Setters
 // ---------------------------------------------------------------------------
+
+/// Change the provider configuration: base URL, timeout, headers, retries.
+///
+/// ```gleam
+/// |> configure(config.timeout(_, 120_000))
+/// ```
+pub fn configure(m: MiniMax, f: fn(ProviderConfig) -> ProviderConfig) -> MiniMax {
+  MiniMax(..m, config: f(m.config))
+}
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: MiniMax, n: Int) -> MiniMax {
-  MiniMax(..m, max_output_tokens: Some(n))
+  let assert True = n > 0
+  MiniMax(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
 }
 
-/// Set the sampling temperature.
-pub fn temperature(m: MiniMax, t: Float) -> MiniMax {
-  MiniMax(..m, temperature: Some(t))
-}
-
-/// Set the top-p (nucleus sampling) value.
-pub fn top_p(m: MiniMax, p: Float) -> MiniMax {
-  MiniMax(..m, top_p: Some(p))
+/// Stop generating when the model writes any of these strings.
+pub fn stop_sequences(m: MiniMax, stops: List(String)) -> MiniMax {
+  MiniMax(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
 }
 
 // ---------------------------------------------------------------------------
 // Build
 // ---------------------------------------------------------------------------
 
-/// Build a `Model` from this MiniMax configuration.
+/// Build a `Model` to use with `agent.new`.
 pub fn build(m: MiniMax) -> Model {
-  let provider = minimax_provider.new(api_key: m.api_key, model: m.model_id)
-
-  let settings =
-    ModelSettings(
-      max_output_tokens: m.max_output_tokens,
-      temperature: m.temperature,
-      top_p: m.top_p,
-      top_k: None,
-      stop_sequences: None,
-      seed: None,
-      presence_penalty: None,
-      frequency_penalty: None,
-    )
-
-  Model(provider: provider, settings: settings)
+  Model(provider: minimax_provider.from_config(m.config), settings: m.settings)
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-fn new_minimax(api_key: String, model_id: String) -> MiniMax {
+fn new(key: String, model_id: String) -> MiniMax {
   MiniMax(
-    api_key: api_key,
-    model_id: model_id,
-    max_output_tokens: None,
-    temperature: None,
-    top_p: None,
+    config: minimax_provider.default_config(api_key: key, model: model_id),
+    settings: provider.default_settings(),
   )
 }

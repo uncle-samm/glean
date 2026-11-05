@@ -1,82 +1,82 @@
-//// DeepSeek reasoning models.
+//// DeepSeek models with thinking turned on.
 ////
-//// Covers DeepSeek-Reasoner and DeepSeek-R1 models.
-//// Supported parameters: max_output_tokens only.
-//// These models do not support temperature or top_p.
-
-import gleam/option.{type Option, None, Some}
+//// Thinking mode ignores sampling parameters, so this builder doesn't offer
+//// them. The model's reasoning is returned as reasoning events and sent back
+//// on later turns, which DeepSeek requires when tools are used.
+import gleam/json
+import gleam/option.{Some}
 import glean/model.{type Model, Model}
-import glean/provider.{ModelSettings}
+import glean/provider.{type ModelSettings, ModelSettings, type ReasoningEffort}
+import glean/providers/config.{type ProviderConfig}
 import glean/providers/deepseek as deepseek_provider
 
-/// A DeepSeek reasoning model builder.
-/// Use one of the constructor functions to create a value, chain builder
-/// functions to set parameters, then call `build()` to get a `Model`.
+/// A DeepSeek (thinking) model builder. Pick a model with one of the constructors
+/// (or `custom`), chain setters, then call `build()`.
 pub opaque type DeepseekReasoning {
-  DeepseekReasoning(
-    api_key: String,
-    model_id: String,
-    max_output_tokens: Option(Int),
-  )
+  DeepseekReasoning(config: ProviderConfig, settings: ModelSettings)
 }
 
 // ---------------------------------------------------------------------------
 // Constructors
 // ---------------------------------------------------------------------------
 
-/// DeepSeek Reasoner
-pub fn reasoner(api_key key: String) -> DeepseekReasoning {
-  new_deepseek_reasoning(key, "deepseek-reasoner")
+/// DeepSeek V4.1 Flash. Model ID: `deepseek-flash`.
+pub fn flash(api_key key: String) -> DeepseekReasoning {
+  new(key, "deepseek-flash")
 }
 
-/// DeepSeek R1
-pub fn r1(api_key key: String) -> DeepseekReasoning {
-  new_deepseek_reasoning(key, "deepseek-r1")
+/// DeepSeek V4 Pro. Model ID: `deepseek-v4-pro`.
+pub fn v4_pro(api_key key: String) -> DeepseekReasoning {
+  new(key, "deepseek-v4-pro")
+}
+
+/// Any other model ID served by this API, such as one released after this
+/// version of glean. Only this module's setters are available, so check the
+/// model accepts them.
+pub fn custom(api_key key: String, model model_id: String) -> DeepseekReasoning {
+  let assert True = model_id != ""
+  new(key, model_id)
 }
 
 // ---------------------------------------------------------------------------
-// Builder functions
+// Setters
 // ---------------------------------------------------------------------------
+
+/// Change the provider configuration: base URL, timeout, headers, retries.
+///
+/// ```gleam
+/// |> configure(config.timeout(_, 120_000))
+/// ```
+pub fn configure(m: DeepseekReasoning, f: fn(ProviderConfig) -> ProviderConfig) -> DeepseekReasoning {
+  DeepseekReasoning(..m, config: f(m.config))
+}
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: DeepseekReasoning, n: Int) -> DeepseekReasoning {
-  DeepseekReasoning(..m, max_output_tokens: Some(n))
+  let assert True = n > 0
+  DeepseekReasoning(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
+}
+
+/// Set how much the model should think before answering.
+pub fn reasoning_effort(m: DeepseekReasoning, effort: ReasoningEffort) -> DeepseekReasoning {
+  DeepseekReasoning(..m, settings: ModelSettings(..m.settings, reasoning_effort: Some(effort)))
 }
 
 // ---------------------------------------------------------------------------
 // Build
 // ---------------------------------------------------------------------------
 
-/// Build a `Model` from this DeepSeek Reasoning configuration.
+/// Build a `Model` to use with `agent.new`.
 pub fn build(m: DeepseekReasoning) -> Model {
-  let provider = deepseek_provider.new(api_key: m.api_key, model: m.model_id)
-
-  let settings =
-    ModelSettings(
-      max_output_tokens: m.max_output_tokens,
-      temperature: None,
-      top_p: None,
-      top_k: None,
-      stop_sequences: None,
-      seed: None,
-      presence_penalty: None,
-      frequency_penalty: None,
-    )
-
-  Model(provider: provider, settings: settings)
+  Model(provider: deepseek_provider.from_config(m.config), settings: m.settings)
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-fn new_deepseek_reasoning(
-  api_key: String,
-  model_id: String,
-) -> DeepseekReasoning {
+fn new(key: String, model_id: String) -> DeepseekReasoning {
   DeepseekReasoning(
-    api_key: api_key,
-    model_id: model_id,
-    max_output_tokens: None,
+    config: 
+  deepseek_provider.default_config(api_key: key, model: model_id)
+  |> config.extra_body_field(_, "thinking", json.object([#("type", json.string("enabled"))]))
+  ,
+    settings: provider.default_settings(),
   )
 }

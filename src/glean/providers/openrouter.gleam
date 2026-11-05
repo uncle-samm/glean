@@ -6,17 +6,27 @@ import glean/providers/openai_compatible
 
 const base_url = "https://openrouter.ai/api/v1"
 
+/// The default configuration for this provider. Change it with the
+/// `glean/providers/config` setters, then pass it to `from_config`.
+pub fn default_config(
+  api_key api_key: String,
+  model model: String,
+) -> ProviderConfig {
+  config.new(api_key: api_key, model: model)
+  |> config.base_url(base_url)
+  |> config.stream_usage(_, True)
+}
+
 /// Create an OpenRouter provider.
-/// Model names are prefixed with provider, e.g. "openai/gpt-4o", "anthropic/claude-sonnet-4-20250514".
+/// Model names are prefixed with provider, e.g. "openai/gpt-5.5", "anthropic/claude-sonnet-5-5".
 ///
 /// ## Example
 ///
 /// ```gleam
-/// let provider = openrouter.new(api_key: "sk-or-...", model: "anthropic/claude-sonnet-4-20250514")
+/// let provider = openrouter.new(api_key: "sk-or-...", model: "anthropic/claude-sonnet-5-5")
 /// ```
 pub fn new(api_key api_key: String, model model: String) -> Provider {
-  config.new(api_key: api_key, model: model)
-  |> config.base_url(base_url)
+  default_config(api_key: api_key, model: model)
   |> from_config
 }
 

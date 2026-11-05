@@ -1,6 +1,9 @@
+import gleam/erlang/process
 import gleam/list
+import gleam/string
 import glean/agent
 import glean/error
+import glean/message
 import glean/run
 import glean/schema
 import glean/testing/function_provider
@@ -50,25 +53,127 @@ pub fn tool_execution_error_non_fatal_test() {
   }
 }
 
-pub fn tool_not_found_is_fatal_test() {
-  // Model calls "nonexistent_tool" which isn't in the toolset
+pub fn unknown_tool_is_reported_to_the_model_test() {
+  // The model calls a tool that isn't in the toolset. Instead of ending the
+  // run, glean tells the model which tools exist so it can recover.
   let p =
-    provider.test_provider([
-      ToolCallResponse([
-        ScriptedToolCall(id: "c1", name: "nonexistent_tool", arguments: "{}"),
-      ]),
-    ])
-
-  // No tools registered!
-  let a = agent.new(p)
-
-  case run.generate(a, Nil, "Call the tool") {
-    Ok(_) -> panic as "Expected ToolNotFound error"
-    Error(err) ->
-      case err {
-        error.ToolNotFound(name) -> name |> should.equal("nonexistent_tool")
-        _ -> panic as "Expected ToolNotFound"
+    function_provider.function_provider("test", fn(request) {
+      case last_tool_results(request.messages) {
+        [] -> Ok(provider.tool_call_result([#("c1", "nonexistent_tool", "{}")]))
+        [message.ToolResultError(error_message: msg, ..)] ->
+          Ok(provider.text_result(msg))
+        _ -> Ok(provider.text_result("unexpected"))
       }
+    })
+
+  let real_tool =
+    tool.new(
+      name: "real_tool",
+      description: "Exists",
+      input_schema: schema.object(properties: [], required: []),
+      execute: fn(_ctx, _args) { Ok("ok") },
+    )
+  let a = agent.new(p) |> agent.tools(tool.toolset([real_tool]))
+
+  let assert Ok(result) = run.generate(a, Nil, "Call the tool")
+  result.text
+  |> should.equal(
+    "Unknown tool \"nonexistent_tool\". Available tools: real_tool",
+  )
+  result.steps |> should.equal(2)
+}
+
+pub fn invalid_arguments_are_rejected_before_execution_test() {
+  // "a" must be an integer; the tool must never run with a string.
+  let p =
+    function_provider.function_provider("test", fn(request) {
+      case last_tool_results(request.messages) {
+        [] ->
+          Ok(provider.tool_call_result([#("c1", "add", "{\"a\":\"two\"}")]))
+        [message.ToolResultError(error_message: msg, ..)] ->
+          Ok(provider.text_result(msg))
+        _ -> Ok(provider.text_result("tool ran"))
+      }
+    })
+
+  let add_tool =
+    tool.new(
+      name: "add",
+      description: "Add",
+      input_schema: schema.object(
+        properties: [#("a", schema.int()), #("b", schema.int())],
+        required: ["a", "b"],
+      ),
+      execute: fn(_ctx, _args) { panic as "must not run with invalid input" },
+    )
+  let a = agent.new(p) |> agent.tools(tool.toolset([add_tool]))
+
+  let assert Ok(result) = run.generate(a, Nil, "Add")
+  result.text
+  |> should.equal(
+    "Invalid arguments: b: Missing required field; a: Expected an integer, got a string",
+  )
+}
+
+pub fn parallel_tool_results_keep_model_order_test() {
+  // The first tool is slow; its result must still come first.
+  let p =
+    function_provider.function_provider("test", fn(request) {
+      case last_tool_results(request.messages) {
+        [] ->
+          Ok(
+            provider.tool_call_result([
+              #("c1", "slow", "{}"),
+              #("c2", "fast", "{}"),
+            ]),
+          )
+        results ->
+          Ok(provider.text_result(
+            results
+            |> list.map(fn(r) {
+              case r {
+                message.ToolResultOk(output: o, ..) -> o
+                message.ToolResultError(error_message: e, ..) -> e
+              }
+            })
+            |> string.join(","),
+          ))
+      }
+    })
+
+  let slow =
+    tool.new(
+      name: "slow",
+      description: "Slow",
+      input_schema: schema.object(properties: [], required: []),
+      execute: fn(_ctx, _args) {
+        process.sleep(50)
+        Ok("slow")
+      },
+    )
+  let fast =
+    tool.new(
+      name: "fast",
+      description: "Fast",
+      input_schema: schema.object(properties: [], required: []),
+      execute: fn(_ctx, _args) { Ok("fast") },
+    )
+  let a = agent.new(p) |> agent.tools(tool.toolset([slow, fast]))
+
+  let assert Ok(result) = run.generate(a, Nil, "Go")
+  result.text |> should.equal("slow,fast")
+
+  let assert Ok(result) =
+    run.generate(agent.sequential_tool_calls(a), Nil, "Go")
+  result.text |> should.equal("slow,fast")
+}
+
+fn last_tool_results(
+  messages: List(message.Message),
+) -> List(message.ToolResult) {
+  case list.last(messages) {
+    Ok(message.ToolResultMessage(results)) -> results
+    _ -> []
   }
 }
 

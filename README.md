@@ -8,13 +8,17 @@ A Gleam framework for building AI agents. Think [Vercel AI SDK](https://github.c
 ## Features
 
 - **Type-safe model builders** — each model only exposes its supported parameters. The compiler catches unsupported settings.
-- **10 providers, 78+ models** — OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, Qwen, Moonshot, MiniMax, OpenRouter, plus any OpenAI-compatible endpoint
-- **Tool calling** — typed tools with dependency injection, JSON Schema tool definitions, retry logic, and error recovery
+- **10 providers** — OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, Qwen, Moonshot, MiniMax, OpenRouter, plus any OpenAI-compatible endpoint. Every builder has `custom(model:)` for model IDs released after this version.
+- **Tool calling** — typed tools with dependency injection, JSON Schema definitions, arguments validated before your tool runs, parallel execution, retries, and error recovery
+- **Structured output** — ask for JSON matching a schema; glean validates the answer
+- **Reasoning** — thinking/reasoning content from Claude, Gemini, DeepSeek, Kimi and Qwen is streamed and sent back on later turns as each API requires
 - **Real streaming** — SSE-based streaming with start/delta/end events for text, reasoning, and tool calls across all providers
 - **Multi-turn conversations** — continue previous conversations with full message history
 - **Middleware** — composable request/result transformers
 - **Simulation testing** — deterministic multi-step agent testing without API calls
 - **Pure Gleam** — no FFI, no macros, no magic. BEAM-only target.
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## Installation
 
@@ -35,8 +39,7 @@ import glean/run
 
 pub fn main() {
   let my_agent =
-    anthropic.haiku_4_5(api_key: "sk-ant-...")
-    |> anthropic.temperature(0.7)
+    anthropic.sonnet_5_5(api_key: "sk-ant-...")
     |> anthropic.max_output_tokens(1024)
     |> anthropic.build
     |> agent.from
@@ -57,7 +60,7 @@ import gleam/io
 import gleam/json
 import glean/agent
 import glean/error
-import glean/models/openai
+import glean/models/openai_reasoning
 import glean/run
 import glean/schema
 import glean/tool
@@ -79,15 +82,19 @@ pub fn main() {
       }
       case json.parse(args_json, decoder) {
         Ok(city) -> Ok("Weather in " <> city <> ": 22C, sunny")
-        Error(_) -> Error("Could not parse city")
+        Error(_) ->
+          Error(error.ToolExecutionError(
+            tool_name: "get_weather",
+            tool_call_id: "",
+            reason: "Could not parse city",
+          ))
       }
     },
   )
 
   let my_agent =
-    openai.gpt5(api_key: "sk-...")
-    |> openai.temperature(0.3)
-    |> openai.build
+    openai_reasoning.gpt5_5(api_key: "sk-...")
+    |> openai_reasoning.build
     |> agent.from
     |> agent.system("You are a weather assistant. Use the get_weather tool.")
     |> agent.tools(tool.toolset([weather_tool]))
@@ -101,6 +108,31 @@ pub fn main() {
 
 The agent loop automatically handles the tool call cycle: generate -> tool call -> tool result -> generate again until the model responds with text.
 
+Before a tool runs, its arguments are checked against `input_schema`. Invalid arguments, unknown tool names and tool errors are all sent back to the model as error results so it can correct itself; they don't end the run. When the model asks for several tools at once they run concurrently, and results are returned in the order the model asked for them (use `agent.sequential_tool_calls` to turn this off).
+
+### Structured output
+
+```gleam
+import gleam/option.{Some}
+
+let person =
+  schema.object(
+    properties: [#("name", schema.string()), #("age", schema.int())],
+    required: ["name", "age"],
+  )
+
+let my_agent =
+  model
+  |> agent.from
+  |> agent.json_output(schema: Some(person), name: Some("person"))
+
+// result.text is JSON that matches `person`; anything else fails the run
+// with OutputValidationError.
+let assert Ok(result) = run.generate(my_agent, Nil, "Invent a person")
+```
+
+OpenAI-compatible providers use `response_format` (with `strict: true` when the schema allows it), Gemini uses `responseJsonSchema`, and Claude uses `output_config.format`.
+
 ### Streaming
 
 ```gleam
@@ -113,7 +145,7 @@ import glean/stream
 
 pub fn main() {
   let my_agent =
-    anthropic.sonnet_4_6(api_key: "sk-ant-...")
+    anthropic.sonnet_5_5(api_key: "sk-ant-...")
     |> anthropic.build
     |> agent.from
 
@@ -144,7 +176,7 @@ All providers support real SSE streaming — text arrives token-by-token. Events
 ### Multi-turn conversation
 
 ```gleam
-let my_agent = agent.from(anthropic.haiku_4_5(api_key: key) |> anthropic.build)
+let my_agent = agent.from(anthropic.haiku_5_5(api_key: key) |> anthropic.build)
 
 // First turn
 let assert Ok(result1) = run.generate(my_agent, Nil, "My name is Sam.")
@@ -191,62 +223,66 @@ run.generate(my_agent, deps, "Look up user 123")
 Each provider has its own opaque type that only exposes the parameters that model supports. The compiler prevents unsupported settings.
 
 ```gleam
-import glean/models/openai
-import glean/models/openai_reasoning
 import glean/models/anthropic
 import glean/models/gemini
+import glean/models/openai_reasoning
+import glean/provider
+import glean/providers/config
 
-// GPT-5 supports temperature, top_p, seed, penalties, stops
-let gpt = openai.gpt5(api_key: key)
-  |> openai.temperature(0.7)
-  |> openai.seed(42)
-  |> openai.frequency_penalty(0.5)
-  |> openai.build
-
-// o3 is a reasoning model — only max_output_tokens and stop_sequences
-let o3 = openai_reasoning.o3(api_key: key)
-  |> openai_reasoning.max_output_tokens(4096)
+// GPT-5 and later are reasoning models: no temperature, but reasoning effort
+let gpt = openai_reasoning.gpt5_5(api_key: key)
+  |> openai_reasoning.reasoning_effort(provider.HighEffort)
   |> openai_reasoning.build
-// openai_reasoning.temperature(o3, 0.5)  // COMPILE ERROR
+// openai_reasoning.temperature(gpt, 0.5)  // COMPILE ERROR
 
-// Claude supports temperature, top_p, top_k, stops
-let claude = anthropic.opus_4_6(api_key: key)
-  |> anthropic.temperature(0.5)
-  |> anthropic.top_k(40)
+// Current Claude models reject sampling parameters, so they aren't offered
+let claude = anthropic.opus_5_5(api_key: key)
+  |> anthropic.reasoning_effort(provider.MediumEffort)
   |> anthropic.build
 
 // Gemini supports temperature, top_p, top_k, seed, stops
-let gem = gemini.flash_2_5(api_key: key)
+let gem = gemini.flash_3_8(api_key: key)
   |> gemini.temperature(0.8)
   |> gemini.seed(123)
   |> gemini.build
 ```
 
-### Deprecated model handling
+### New models, proxies and timeouts
 
-Deprecated models emit a compiler warning and automatically swap to their replacement at runtime:
+Every model module has `custom` for model IDs that glean doesn't list yet, and `configure` to change the provider configuration:
 
 ```gleam
-// Compiler warning: "gpt-4o is deprecated (shutdown: Feb 16, 2026). Use gpt5() instead."
-let model = openai.gpt4o(api_key: key) |> openai.build
-// At runtime: prints warning, uses "gpt-5" model ID
+let model =
+  anthropic.custom(api_key: key, model: "claude-next")
+  |> anthropic.configure(fn(cfg) {
+    cfg
+    |> config.base_url("https://my-proxy.example.com/v1")
+    |> config.timeout(120_000)
+  })
+  |> anthropic.build
 ```
+
+### Deprecated and retired models
+
+Models with an announced retirement date are marked `@deprecated`, so the compiler warns you; glean still calls the model you asked for. Retired models are removed, so code that uses them stops compiling instead of failing at runtime.
 
 ### Available Models
 
-| Provider | Module | Current Models |
+| Provider | Module | Models |
 |---|---|---|
-| OpenAI | `glean/models/openai` | GPT-5.4, GPT-5.4 Pro, GPT-5.3, GPT-5.2, GPT-5.2 Pro, GPT-5.1, GPT-5, GPT-5 Pro, GPT-OSS 120B/20B |
-| OpenAI Reasoning | `glean/models/openai_reasoning` | o3, o3-mini, o3-pro, GPT-5 Mini, GPT-5 Nano |
-| Anthropic | `glean/models/anthropic` | Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 |
-| Google Gemini | `glean/models/gemini` | Gemini 3.1 Pro, 3 Flash, 3.1 Flash Lite, 2.5 Pro/Flash/Flash Lite, image models |
-| Mistral | `glean/models/mistral` | Large 3, Medium 3.1, Small 3.2, Magistral, Codestral, Devstral, Ministral 3B/8B/14B |
-| DeepSeek | `glean/models/deepseek` | DeepSeek Chat, V3.1 |
-| DeepSeek Reasoning | `glean/models/deepseek_reasoning` | Reasoner, R1 |
-| Qwen | `glean/models/qwen` | Qwen 3.5 Plus/Flash, Qwen 3 Max/Plus, QwQ Plus, Qwen 3 Coder |
-| Moonshot | `glean/models/moonshot` | Kimi K2.5, K2, K2 Thinking |
-| MiniMax | `glean/models/minimax` | MiniMax M2.5, M2.1, M2.1 Lightning, M2, M1 |
+| OpenAI (reasoning) | `glean/models/openai_reasoning` | GPT-6.1 Terra, GPT-5.5, GPT-5.4 (+ mini, nano), GPT-5.2, GPT-5.1, GPT-5 (+ mini, nano), o3, o3-mini, o4-mini |
+| OpenAI (sampling) | `glean/models/openai` | GPT-4.1 (+ mini, nano), GPT-4o (+ mini) |
+| Anthropic | `glean/models/anthropic` | Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Sonnet 5, Haiku 5.5 |
+| Anthropic (sampling) | `glean/models/anthropic_sampling` | Claude Opus 4.6, Sonnet 4.6, Haiku 4.5, Opus 4.5, Sonnet 4.5 (retiring) |
+| Google Gemini | `glean/models/gemini` | Gemini 3.1 Pro, 3.8 Flash, 3.6 Flash, 3.5 Flash-Lite, 3.1 Flash-Lite, 3 Flash, 2.5 Pro/Flash/Flash-Lite, image models |
+| Mistral | `glean/models/mistral` | Large 4, Medium 3.5, Small 4, Large 3, Magistral, Codestral, Devstral, Ministral 3B/8B/14B |
+| DeepSeek | `glean/models/deepseek`, `glean/models/deepseek_reasoning` | V4.1 Flash, V4 Pro (thinking off / on) |
+| Qwen | `glean/models/qwen` | Qwen3.8 Max, Qwen3.7 Plus, Qwen3.8 Flash, Qwen3.5 Plus/Flash, Qwen3 Max, Qwen3 Coder Plus, QwQ Plus |
+| Moonshot | `glean/models/moonshot` | Kimi K3, K2.7 Code (+ high-speed), K2.6 |
+| MiniMax | `glean/models/minimax` | MiniMax M3, M3.1 Flash, M2.7 and M2.5 (retiring Nov 18, 2026) |
 | OpenRouter | `glean/providers/openrouter` | Any model via `"provider/model"` format |
+
+The catalog was checked against provider docs in November 2026. Model lists change quickly; use `custom` when a model you need is missing.
 
 ## Middleware
 
@@ -334,29 +370,29 @@ let flaky_tool = tool.new(
 |> tool.with_max_retries(3)
 ```
 
-Retries apply to any error returned by the tool's `execute` function. Once retries run out, the error is sent back to the model so it can recover. A call to a tool that isn't in the toolset (`ToolNotFound`) ends the run immediately.
+Retries apply to any error returned by the tool's `execute` function. Once retries run out, the error is sent back to the model so it can recover.
 
 ## Provider Configuration
 
-For advanced use cases, configure providers directly with `ProviderConfig`.
-
-> Note: `glean/providers/*` modules are currently internal, so they don't appear on HexDocs and the compiler warns when you import them. A public API for custom model IDs, base URLs and timeouts is planned.
-
+Model builders take a configuration change through `configure` (see above). You can also build a provider directly from a `ProviderConfig`:
 
 ```gleam
 import glean/providers/config
 
-let cfg = config.new(api_key: "sk-...", model: "gpt-5")
+import glean/providers/openai
+
+let provider = openai.default_config(api_key: "sk-...", model: "gpt-5.5")
   |> config.base_url("https://my-proxy.example.com/v1")
   |> config.timeout(120_000)        // 2 minute timeout
   |> config.max_retries(5)          // retry 429/5xx up to 5 times
   |> config.initial_retry_delay(500) // start backoff at 500ms
   |> config.headers([#("X-Custom", "value")])
+  |> openai.from_config
 ```
 
 All providers include:
 - **HTTP timeout** — configurable per-provider (default 60s)
-- **Automatic retry** — exponential backoff on 429 (rate limit) and 5xx (server errors)
+- **Automatic retry** — exponential backoff with jitter on 408, 409, 429, 5xx and failed connections, honouring `Retry-After`
 - **Custom headers** — add any headers to requests
 
 ## Architecture
@@ -377,16 +413,17 @@ glean/
   models/               Per-provider type-safe model builders
     openai.gleam          GPT chat models
     openai_reasoning.gleam  o-series and reasoning models
-    anthropic.gleam       Claude models
+    anthropic.gleam       Current Claude models
+    anthropic_sampling.gleam  Older Claude models with sampling parameters
     gemini.gleam          Gemini models
-    deepseek.gleam        DeepSeek chat models
-    deepseek_reasoning.gleam  DeepSeek reasoning models
+    deepseek.gleam        DeepSeek, thinking off
+    deepseek_reasoning.gleam  DeepSeek, thinking on
     mistral.gleam         Mistral models
     moonshot.gleam        Moonshot/Kimi models
     qwen.gleam            Qwen models
     minimax.gleam         MiniMax models
 
-  providers/            Provider implementations (internal)
+  providers/            Provider implementations and ProviderConfig
   testing/              Test infrastructure
     provider.gleam        Scripted test provider
     function_provider.gleam  Function-backed test provider
@@ -408,22 +445,18 @@ export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
 export GEMINI_API_KEY=AIza...
 gleam test     # Runs all tests including integration
+
+gleam run -m glean_bench   # Micro-benchmarks (encoding, decoding, validation, run loop)
 ```
 
 ## Publishing
 
 ```sh
-# Store your Hex API key
-echo "your-hex-api-key" > .hex_api_key
-
-# Full release: push, tag, publish to Hex
+# Full release: runs the tests, pushes, tags, and publishes to Hex
 make release
-
-# Or individual steps
-make push      # Push main to origin
-make tag       # Create and push version tag
-make publish   # Publish to Hex
 ```
+
+`gleam publish` asks for your Hex credentials, or reads `HEXPM_API_KEY` from the environment.
 
 ## License
 

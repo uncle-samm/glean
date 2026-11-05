@@ -1,5 +1,5 @@
 name = "glean"
-version = "0.1.0"
+version = "0.2.0"
 gleam = ">= 1.11.0"
 description = "A Gleam framework for building AI agents — type-safe, multi-provider, with tool calling, streaming, and simulation testing"
 licences = ["MIT"]
@@ -9,8 +9,8 @@ links = [
 ]
 
 internal_modules = [
-  "glean/providers/*",
-  "glean/json_value",
+  "glean/providers/http_utils",
+  "glean/providers/sse",
 ]
 
 [dependencies]

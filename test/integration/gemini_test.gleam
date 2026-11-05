@@ -11,7 +11,7 @@ import integration/integration_helpers.{
 
 const env_var = "GEMINI_API_KEY"
 
-const model = "gemini-3-flash-preview"
+const model = "gemini-3.5-flash-lite"
 
 pub fn gemini_text_generation_test() {
   case get_api_key(env_var) {

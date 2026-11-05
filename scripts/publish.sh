@@ -1,7 +1,11 @@
 #!/usr/bin/expect -f
+# Publishes to Hex. Needs HEXPM_API_KEY in the environment.
+# Hex asks for confirmation on 0.x versions; this answers it.
 
-set api_key [exec cat [file dirname [info script]]/../.hex_api_key]
-set ::env(HEXPM_API_KEY) $api_key
+if {![info exists ::env(HEXPM_API_KEY)]} {
+    puts "Set HEXPM_API_KEY first."
+    exit 1
+}
 
 spawn gleam publish --yes
 

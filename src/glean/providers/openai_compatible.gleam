@@ -1,5 +1,17 @@
-/// Shared implementation for all OpenAI-compatible providers.
-/// OpenAI, DeepSeek, Mistral, OpenRouter, Moonshot/Kimi, Qwen, MiniMax all use this format.
+//// Shared implementation for all OpenAI-compatible Chat Completions APIs.
+//// OpenAI, DeepSeek, Mistral, OpenRouter, Moonshot/Kimi, Qwen and MiniMax
+//// all use this format, and so can any other compatible endpoint:
+////
+//// ```gleam
+//// config.new(api_key: key, model: "my-model")
+//// |> config.base_url("https://my-gateway.example.com/v1")
+//// |> openai_compatible.create(name: "my-gateway", config: _)
+//// ```
+////
+//// Reasoning returned as `reasoning_content` (DeepSeek, Qwen, Kimi,
+//// MiniMax) or `reasoning` (OpenRouter) is surfaced as reasoning content and
+//// `ReasoningDelta` stream events.
+
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/json
@@ -7,12 +19,13 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import gleam/string_tree
+import gleam/string_tree.{type StringTree}
 import glean/error.{type FinishReason, type GleanError}
 import glean/message.{type Message}
 import glean/provider.{
   type GenerateRequest, type GenerateResult, type GeneratedContent,
-  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type Provider, GenerateResult, GeneratedReasoning, GeneratedText,
+  GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
@@ -44,12 +57,14 @@ fn do_generate(
   gen_request: GenerateRequest,
 ) -> Result(GenerateResult, GleanError) {
   let body = encode_request(config, gen_request, False)
-  let url = config.base_url <> "/chat/completions"
-
-  case make_http_request(config, provider_name, url, body) {
-    Error(err) -> Error(err)
-    Ok(response_body) -> decode_response(config.model, response_body)
-  }
+  use response_body <- result.try(http_utils.send_post(
+    config,
+    provider_name,
+    config.base_url <> "/chat/completions",
+    body,
+    [#("authorization", "Bearer " <> config.api_key)],
+  ))
+  decode_response(config.model, response_body)
 }
 
 // --- Streaming generation ---
@@ -57,7 +72,9 @@ fn do_generate(
 /// Accumulator for streaming state — threaded through a pure receive loop.
 pub opaque type StreamAccumulator {
   StreamAccumulator(
-    text: string_tree.StringTree,
+    text: StringTree,
+    reasoning: StringTree,
+    /// Newest first; reversed once at the end.
     tool_calls: List(StreamingToolCall),
     finish_reason: FinishReason,
     usage: Usage,
@@ -70,9 +87,8 @@ type StreamingToolCall {
   StreamingToolCall(
     index: Int,
     id: String,
-    name: string_tree.StringTree,
-    args: string_tree.StringTree,
-    started: Bool,
+    name: StringTree,
+    args: StringTree,
   )
 }
 
@@ -83,14 +99,19 @@ fn do_stream(
   on_event: fn(StreamEvent) -> Nil,
 ) -> Result(GenerateResult, GleanError) {
   let body = encode_request(config, gen_request, True)
-  let url = config.base_url <> "/chat/completions"
-
   let headers = [
     #("authorization", "Bearer " <> config.api_key),
     ..list.map(config.headers, fn(h) { #(h.0, h.1) })
   ]
 
-  case sse.start_stream(url, headers, body, config.timeout_ms) {
+  case
+    sse.start_stream(
+      config.base_url <> "/chat/completions",
+      headers,
+      body,
+      config.timeout_ms,
+    )
+  {
     Error(msg) ->
       Error(error.ProviderError(
         provider: provider_name,
@@ -99,42 +120,17 @@ fn do_stream(
         message: "Streaming failed: " <> msg,
       ))
     Ok(#(event_subject, manager_subject)) -> {
-      let acc =
-        StreamAccumulator(
-          text: string_tree.new(),
-          tool_calls: [],
-          finish_reason: error.Stop,
-          usage: stream.zero_usage(),
-          finished: False,
-        )
-
-      // Pure receive loop — state threaded through recursion
       use final_acc <- result.try(stream_loop(
         event_subject,
         manager_subject,
-        acc,
+        new_stream_accumulator(),
         on_event,
         provider_name,
         config.model,
         config.timeout_ms,
       ))
-
-      let text_content = case string_tree.to_string(final_acc.text) {
-        "" -> []
-        t -> [GeneratedText(text: t)]
-      }
-
-      let tool_content =
-        list.map(final_acc.tool_calls, fn(tc) {
-          GeneratedToolCall(
-            tool_call_id: tc.id,
-            tool_name: string_tree.to_string(tc.name),
-            arguments_json: string_tree.to_string(tc.args),
-          )
-        })
-
       Ok(GenerateResult(
-        content: list.append(text_content, tool_content),
+        content: accumulated_content(final_acc),
         finish_reason: final_acc.finish_reason,
         usage: final_acc.usage,
         model_id: config.model,
@@ -151,8 +147,7 @@ fn do_stream(
 /// response (e.g. 401, 429) shows up here as a stream that closes without
 /// ever finishing.
 ///
-/// Public only so tests can drive it with hand-made subjects; this module
-/// is internal to the package.
+/// Public so tests can drive it with hand-made subjects.
 pub fn stream_loop(
   subject: process.Subject(httpp_sse.SSEEvent),
   manager: process.Subject(httpp_sse.SSEManagerMessage),
@@ -197,7 +192,7 @@ pub fn stream_loop(
           stream_loop(
             subject,
             manager,
-            process_openai_chunk(acc, data, on_event),
+            process_chunk(acc, data, on_event),
             on_event,
             provider_name,
             model,
@@ -220,10 +215,11 @@ fn stream_error_decoder() -> decode.Decoder(String) {
   decode.success(message)
 }
 
-/// A fresh accumulator. Public for tests only.
+/// A fresh accumulator. Public for tests.
 pub fn new_stream_accumulator() -> StreamAccumulator {
   StreamAccumulator(
     text: string_tree.new(),
+    reasoning: string_tree.new(),
     tool_calls: [],
     finish_reason: error.Stop,
     usage: stream.zero_usage(),
@@ -231,21 +227,73 @@ pub fn new_stream_accumulator() -> StreamAccumulator {
   )
 }
 
-/// The text accumulated so far. Public for tests only.
+/// The text accumulated so far. Public for tests.
 pub fn accumulated_text(acc: StreamAccumulator) -> String {
   string_tree.to_string(acc.text)
 }
 
-fn process_openai_chunk(
+/// Everything accumulated, in the order a non-streaming response has it:
+/// reasoning, text, then tool calls. Public for tests.
+pub fn accumulated_content(acc: StreamAccumulator) -> List(GeneratedContent) {
+  let reasoning = case string_tree.to_string(acc.reasoning) {
+    "" -> []
+    r -> [GeneratedReasoning(text: r, signature: None)]
+  }
+  let text = case string_tree.to_string(acc.text) {
+    "" -> []
+    t -> [GeneratedText(text: t)]
+  }
+  let tool_calls =
+    acc.tool_calls
+    |> list.reverse
+    |> list.map(fn(tc) {
+      GeneratedToolCall(
+        tool_call_id: tc.id,
+        tool_name: string_tree.to_string(tc.name),
+        arguments_json: case string_tree.to_string(tc.args) {
+          "" -> "{}"
+          args -> args
+        },
+      )
+    })
+  list.flatten([reasoning, text, tool_calls])
+}
+
+type ChunkData {
+  ChunkData(
+    id: String,
+    text_delta: String,
+    reasoning_delta: String,
+    tool_call_deltas: List(ToolCallDelta),
+    finish_reason: String,
+    usage: Option(Usage),
+  )
+}
+
+type ToolCallDelta {
+  ToolCallDelta(index: Int, id: String, name: String, args: String)
+}
+
+fn process_chunk(
   acc: StreamAccumulator,
   data: String,
   on_event: fn(StreamEvent) -> Nil,
 ) -> StreamAccumulator {
-  let chunk_decoder = openai_chunk_decoder()
-  case json.parse(data, chunk_decoder) {
+  case json.parse(data, chunk_decoder()) {
+    // Keep-alives and payloads glean doesn't use.
     Error(_) -> acc
     Ok(chunk) -> {
-      // Process text delta
+      let acc = case chunk.reasoning_delta {
+        "" -> acc
+        delta -> {
+          on_event(stream.ReasoningDelta(id: chunk.id, delta: delta))
+          StreamAccumulator(
+            ..acc,
+            reasoning: string_tree.append(acc.reasoning, delta),
+          )
+        }
+      }
+
       let acc = case chunk.text_delta {
         "" -> acc
         delta -> {
@@ -254,13 +302,11 @@ fn process_openai_chunk(
         }
       }
 
-      // Process tool call deltas
       let acc =
         list.fold(chunk.tool_call_deltas, acc, fn(a, tcd) {
           process_tool_call_delta(a, tcd, chunk.id, on_event)
         })
 
-      // Process finish reason
       let acc = case chunk.finish_reason {
         "" -> acc
         fr ->
@@ -271,91 +317,12 @@ fn process_openai_chunk(
           )
       }
 
-      // Process usage (some providers send it in the last chunk)
       case chunk.usage {
-        Usage(0, 0) -> acc
-        u -> StreamAccumulator(..acc, usage: u)
+        None -> acc
+        Some(u) -> StreamAccumulator(..acc, usage: u)
       }
     }
   }
-}
-
-type ChunkData {
-  ChunkData(
-    id: String,
-    text_delta: String,
-    tool_call_deltas: List(ToolCallDelta),
-    finish_reason: String,
-    usage: Usage,
-  )
-}
-
-type ToolCallDelta {
-  ToolCallDelta(index: Int, id: String, name: String, args: String)
-}
-
-fn openai_chunk_decoder() -> decode.Decoder(ChunkData) {
-  use id <- decode.optional_field("id", "", decode.string)
-
-  let tool_call_delta_decoder = {
-    use index <- decode.field("index", decode.int)
-    use id <- decode.optional_field("id", "", decode.string)
-    use name <- decode.optional_field("function", "", {
-      use n <- decode.optional_field("name", "", decode.string)
-      decode.success(n)
-    })
-    use args <- decode.optional_field("function", "", {
-      use a <- decode.optional_field("arguments", "", decode.string)
-      decode.success(a)
-    })
-    decode.success(ToolCallDelta(index: index, id: id, name: name, args: args))
-  }
-
-  let choice_decoder = {
-    use delta <- decode.optional_field("delta", #("", []), {
-      use content <- decode.optional_field(
-        "content",
-        None,
-        decode.optional(decode.string),
-      )
-      use tool_calls <- decode.optional_field(
-        "tool_calls",
-        [],
-        decode.list(tool_call_delta_decoder),
-      )
-      decode.success(#(option.unwrap(content, ""), tool_calls))
-    })
-    use finish_reason <- decode.optional_field(
-      "finish_reason",
-      None,
-      decode.optional(decode.string),
-    )
-    decode.success(#(delta, option.unwrap(finish_reason, "")))
-  }
-
-  use choices <- decode.optional_field(
-    "choices",
-    [],
-    decode.list(choice_decoder),
-  )
-  use usage <- decode.optional_field("usage", Usage(0, 0), {
-    use input <- decode.optional_field("prompt_tokens", 0, decode.int)
-    use output <- decode.optional_field("completion_tokens", 0, decode.int)
-    decode.success(Usage(input_tokens: input, output_tokens: output))
-  })
-
-  let #(text_delta, tool_call_deltas, finish_reason) = case choices {
-    [#(#(text, tcs), fr), ..] -> #(text, tcs, fr)
-    [] -> #("", [], "")
-  }
-
-  decode.success(ChunkData(
-    id: id,
-    text_delta: text_delta,
-    tool_call_deltas: tool_call_deltas,
-    finish_reason: finish_reason,
-    usage: usage,
-  ))
 }
 
 fn process_tool_call_delta(
@@ -364,40 +331,33 @@ fn process_tool_call_delta(
   chunk_id: String,
   on_event: fn(StreamEvent) -> Nil,
 ) -> StreamAccumulator {
-  let #(tc, is_new) = case find_tool_call(acc.tool_calls, delta.index) {
-    Ok(existing) -> #(existing, False)
-    Error(_) -> #(
+  let existing = list.find(acc.tool_calls, fn(tc) { tc.index == delta.index })
+  let tc = case existing {
+    Ok(tc) -> tc
+    Error(Nil) ->
       StreamingToolCall(
         index: delta.index,
-        id: "",
+        id: delta.id,
         name: string_tree.new(),
         args: string_tree.new(),
-        started: False,
-      ),
-      True,
-    )
+      )
   }
-
-  let tc = case delta.id {
-    "" -> tc
-    id -> StreamingToolCall(..tc, id: id)
+  let tc = case delta.id, tc.id {
+    "", _ -> tc
+    id, "" -> StreamingToolCall(..tc, id: id)
+    _, _ -> tc
   }
+  let tc =
+    StreamingToolCall(..tc, name: string_tree.append(tc.name, delta.name))
 
-  let tc = case delta.name {
-    "" -> tc
-    name -> StreamingToolCall(..tc, name: string_tree.append(tc.name, name))
-  }
-
-  let tc = case is_new && tc.id != "" {
-    True -> {
+  case existing {
+    Error(Nil) ->
       on_event(stream.ToolCallStart(
         id: chunk_id,
         tool_call_id: tc.id,
         tool_name: string_tree.to_string(tc.name),
       ))
-      StreamingToolCall(..tc, started: True)
-    }
-    False -> tc
+    Ok(_) -> Nil
   }
 
   let tc = case delta.args {
@@ -412,129 +372,214 @@ fn process_tool_call_delta(
     }
   }
 
-  let tool_calls = upsert_tool_call(acc.tool_calls, tc)
-  StreamAccumulator(..acc, tool_calls: tool_calls)
-}
-
-fn find_tool_call(
-  calls: List(StreamingToolCall),
-  index: Int,
-) -> Result(StreamingToolCall, Nil) {
-  list.find(calls, fn(tc) { tc.index == index })
-}
-
-fn upsert_tool_call(
-  calls: List(StreamingToolCall),
-  tc: StreamingToolCall,
-) -> List(StreamingToolCall) {
-  case list.any(calls, fn(c) { c.index == tc.index }) {
-    True ->
-      list.map(calls, fn(c) {
+  let tool_calls = case existing {
+    Error(Nil) -> [tc, ..acc.tool_calls]
+    Ok(_) ->
+      list.map(acc.tool_calls, fn(c) {
         case c.index == tc.index {
           True -> tc
           False -> c
         }
       })
-    False -> list.append(calls, [tc])
   }
+  StreamAccumulator(..acc, tool_calls: tool_calls)
 }
 
-// --- HTTP request ---
+fn chunk_decoder() -> decode.Decoder(ChunkData) {
+  use id <- decode.optional_field("id", "", nullable_string())
 
-fn make_http_request(
-  config: ProviderConfig,
-  provider_name: String,
-  url: String,
-  body: String,
-) -> Result(String, GleanError) {
-  http_utils.send_post(config, provider_name, url, body, [
-    #("authorization", "Bearer " <> config.api_key),
-  ])
+  let tool_call_delta_decoder = {
+    use index <- decode.optional_field("index", 0, decode.int)
+    use id <- decode.optional_field("id", "", nullable_string())
+    use function <- decode.optional_field("function", #("", ""), {
+      use name <- decode.optional_field("name", "", nullable_string())
+      use args <- decode.optional_field("arguments", "", nullable_string())
+      decode.success(#(name, args))
+    })
+    decode.success(ToolCallDelta(
+      index: index,
+      id: id,
+      name: function.0,
+      args: function.1,
+    ))
+  }
+
+  let choice_decoder = {
+    use delta <- decode.optional_field("delta", #("", "", []), {
+      use content <- decode.optional_field("content", "", nullable_string())
+      use reasoning <- decode.then(reasoning_decoder())
+      use tool_calls <- decode.optional_field(
+        "tool_calls",
+        [],
+        nullable_list(tool_call_delta_decoder),
+      )
+      decode.success(#(content, reasoning, tool_calls))
+    })
+    use finish_reason <- decode.optional_field(
+      "finish_reason",
+      "",
+      nullable_string(),
+    )
+    decode.success(#(delta, finish_reason))
+  }
+
+  use choices <- decode.optional_field(
+    "choices",
+    [],
+    nullable_list(choice_decoder),
+  )
+  use usage <- decode.optional_field(
+    "usage",
+    None,
+    decode.optional(usage_decoder()),
+  )
+
+  let #(text_delta, reasoning_delta, tool_call_deltas, finish_reason) = case
+    choices
+  {
+    [#(#(text, reasoning, tcs), fr), ..] -> #(text, reasoning, tcs, fr)
+    [] -> #("", "", [], "")
+  }
+
+  decode.success(ChunkData(
+    id: id,
+    text_delta: text_delta,
+    reasoning_delta: reasoning_delta,
+    tool_call_deltas: tool_call_deltas,
+    finish_reason: finish_reason,
+    usage: usage,
+  ))
+}
+
+/// A string field that may be `null`; null decodes to "".
+fn nullable_string() -> decode.Decoder(String) {
+  decode.optional(decode.string)
+  |> decode.map(option.unwrap(_, ""))
+}
+
+/// A list field that may be `null`; null decodes to [].
+fn nullable_list(of inner: decode.Decoder(a)) -> decode.Decoder(List(a)) {
+  decode.optional(decode.list(inner))
+  |> decode.map(option.unwrap(_, []))
+}
+
+/// Reasoning text from either `reasoning_content` (DeepSeek, Qwen, Kimi,
+/// MiniMax) or `reasoning` (OpenRouter), on the same object as `content`.
+fn reasoning_decoder() -> decode.Decoder(String) {
+  use reasoning_content <- decode.optional_field(
+    "reasoning_content",
+    "",
+    nullable_string(),
+  )
+  use reasoning <- decode.optional_field("reasoning", "", nullable_string())
+  decode.success(case reasoning_content {
+    "" -> reasoning
+    rc -> rc
+  })
+}
+
+fn usage_decoder() -> decode.Decoder(Usage) {
+  use input <- decode.optional_field("prompt_tokens", 0, decode.int)
+  use output <- decode.optional_field("completion_tokens", 0, decode.int)
+  decode.success(Usage(input_tokens: input, output_tokens: output))
 }
 
 // --- Request encoding ---
 
-fn encode_request(
+/// Encode a Chat Completions request body. Public for tests.
+pub fn encode_request(
   config: ProviderConfig,
   gen_request: GenerateRequest,
   stream: Bool,
 ) -> String {
-  let messages_json = encode_messages(gen_request.messages)
-  let tools_json = encode_tools(gen_request.tools)
-
+  let settings = gen_request.settings
+  // Fields are collected newest first and reversed once at the end.
   let fields = [
+    #(
+      "messages",
+      json.preprocessed_array(
+        list.flat_map(gen_request.messages, fn(msg) {
+          encode_message(msg, config.send_reasoning_content)
+        }),
+      ),
+    ),
     #("model", json.string(config.model)),
-    #("messages", json.preprocessed_array(messages_json)),
   ]
 
-  let fields = case tools_json {
+  let fields = case gen_request.tools {
     [] -> fields
-    _ ->
-      list.append(fields, [
-        #("tools", json.preprocessed_array(tools_json)),
-        #("tool_choice", encode_tool_choice(gen_request.tool_choice)),
-      ])
+    tools -> [
+      #("tool_choice", encode_tool_choice(gen_request.tool_choice)),
+      #("tools", json.preprocessed_array(list.map(tools, encode_tool))),
+      ..fields
+    ]
   }
 
-  let fields = case gen_request.settings.max_output_tokens {
-    None -> fields
-    Some(max) ->
-      list.append(fields, [#(config.max_tokens_field, json.int(max))])
-  }
+  let fields =
+    fields
+    |> add_optional(
+      config.max_tokens_field,
+      settings.max_output_tokens,
+      json.int,
+    )
+    |> add_optional("temperature", settings.temperature, json.float)
+    |> add_optional("top_p", settings.top_p, json.float)
+    |> add_optional("seed", settings.seed, json.int)
+    |> add_optional("presence_penalty", settings.presence_penalty, json.float)
+    |> add_optional(
+      "frequency_penalty",
+      settings.frequency_penalty,
+      json.float,
+    )
+    |> add_optional("stop", settings.stop_sequences, fn(stops) {
+      json.array(stops, json.string)
+    })
+    |> add_optional("reasoning_effort", settings.reasoning_effort, fn(effort) {
+      json.string(provider.reasoning_effort_to_string(effort))
+    })
 
-  let fields = case gen_request.settings.temperature {
-    None -> fields
-    Some(temp) -> list.append(fields, [#("temperature", json.float(temp))])
-  }
-
-  let fields = case gen_request.settings.top_p {
-    None -> fields
-    Some(p) -> list.append(fields, [#("top_p", json.float(p))])
-  }
-
-  let fields = case gen_request.settings.seed {
-    None -> fields
-    Some(s) -> list.append(fields, [#("seed", json.int(s))])
-  }
-
-  let fields = case gen_request.settings.presence_penalty {
-    None -> fields
-    Some(pp) -> list.append(fields, [#("presence_penalty", json.float(pp))])
-  }
-
-  let fields = case gen_request.settings.frequency_penalty {
-    None -> fields
-    Some(fp) -> list.append(fields, [#("frequency_penalty", json.float(fp))])
-  }
-
-  let fields = case gen_request.settings.stop_sequences {
-    None -> fields
-    Some(stops) ->
-      list.append(fields, [#("stop", json.array(stops, json.string))])
-  }
-
-  let fields = case stream {
-    False -> fields
-    True -> list.append(fields, [#("stream", json.bool(True))])
+  let fields = case stream, config.stream_usage {
+    False, _ -> fields
+    True, False -> [#("stream", json.bool(True)), ..fields]
+    True, True -> [
+      #("stream_options", json.object([#("include_usage", json.bool(True))])),
+      #("stream", json.bool(True)),
+      ..fields
+    ]
   }
 
   let fields = case gen_request.response_format {
     provider.TextFormat -> fields
-    provider.JsonFormat(schema_opt, name_opt) ->
-      list.append(fields, [
-        #("response_format", encode_response_format(schema_opt, name_opt)),
-      ])
+    provider.JsonFormat(schema_opt, name_opt) -> [
+      #("response_format", encode_response_format(schema_opt, name_opt)),
+      ..fields
+    ]
   }
 
-  json.object(fields)
+  // Provider-specific extras replace glean's field of the same name.
+  let extra_names = list.map(config.extra_body, fn(field) { field.0 })
+  let fields =
+    list.filter(list.reverse(fields), fn(field) {
+      !list.contains(extra_names, field.0)
+    })
+
+  json.object(list.append(fields, config.extra_body))
   |> json.to_string
 }
 
-fn encode_messages(messages: List(Message)) -> List(json.Json) {
-  list.flat_map(messages, encode_message)
+fn add_optional(
+  fields: List(#(String, json.Json)),
+  name: String,
+  value: Option(a),
+  encode: fn(a) -> json.Json,
+) -> List(#(String, json.Json)) {
+  case value {
+    None -> fields
+    Some(v) -> [#(name, encode(v)), ..fields]
+  }
 }
 
-fn encode_message(msg: Message) -> List(json.Json) {
+fn encode_message(msg: Message, send_reasoning: Bool) -> List(json.Json) {
   case msg {
     message.SystemMessage(content) -> [
       json.object([
@@ -542,25 +587,24 @@ fn encode_message(msg: Message) -> List(json.Json) {
         #("content", json.string(content)),
       ]),
     ]
-    message.UserMessage(content) ->
-      case content {
-        [message.UserText(text)] -> [
-          json.object([
-            #("role", json.string("user")),
-            #("content", json.string(text)),
-          ]),
-        ]
-        _ -> [
-          json.object([
-            #("role", json.string("user")),
-            #(
-              "content",
-              json.preprocessed_array(list.map(content, encode_user_content)),
-            ),
-          ]),
-        ]
-      }
-    message.AssistantMessage(content) -> [encode_assistant_message(content)]
+    message.UserMessage([message.UserText(text)]) -> [
+      json.object([
+        #("role", json.string("user")),
+        #("content", json.string(text)),
+      ]),
+    ]
+    message.UserMessage(content) -> [
+      json.object([
+        #("role", json.string("user")),
+        #(
+          "content",
+          json.preprocessed_array(list.map(content, encode_user_content)),
+        ),
+      ]),
+    ]
+    message.AssistantMessage(content) -> [
+      encode_assistant_message(content, send_reasoning),
+    ]
     // Each tool result must be a separate message in OpenAI format
     message.ToolResultMessage(results) -> list.map(results, encode_tool_result)
   }
@@ -573,40 +617,42 @@ fn encode_user_content(content: message.UserContent) -> json.Json {
         #("type", json.string("text")),
         #("text", json.string(text)),
       ])
-    message.UserFile(data, media_type) ->
-      case data {
-        message.Base64Data(b64) ->
-          json.object([
-            #("type", json.string("image_url")),
-            #(
-              "image_url",
-              json.object([
-                #(
-                  "url",
-                  json.string("data:" <> media_type <> ";base64," <> b64),
-                ),
-              ]),
-            ),
-          ])
-        message.UrlData(url) ->
-          json.object([
-            #("type", json.string("image_url")),
-            #("image_url", json.object([#("url", json.string(url))])),
-          ])
+    message.UserFile(data, media_type) -> {
+      let url = case data {
+        message.Base64Data(b64) -> "data:" <> media_type <> ";base64," <> b64
+        message.UrlData(url) -> url
       }
+      json.object([
+        #("type", json.string("image_url")),
+        #("image_url", json.object([#("url", json.string(url))])),
+      ])
+    }
   }
 }
 
 fn encode_assistant_message(
   content: List(message.AssistantContent),
+  send_reasoning: Bool,
 ) -> json.Json {
-  let text_parts =
-    list.filter_map(content, fn(c) {
+  let text =
+    content
+    |> list.filter_map(fn(c) {
       case c {
         message.AssistantText(text) -> Ok(text)
         _ -> Error(Nil)
       }
     })
+    |> string.concat
+
+  let reasoning =
+    content
+    |> list.filter_map(fn(c) {
+      case c {
+        message.AssistantReasoning(text, _) -> Ok(text)
+        _ -> Error(Nil)
+      }
+    })
+    |> string.concat
 
   let tool_calls =
     list.filter_map(content, fn(c) {
@@ -629,19 +675,18 @@ fn encode_assistant_message(
       }
     })
 
-  let text = string.join(text_parts, "")
-
   let fields = [
     #("role", json.string("assistant")),
+    #("content", case text {
+      "" -> json.null()
+      t -> json.string(t)
+    }),
   ]
 
-  let fields = case text {
-    "" ->
-      case tool_calls {
-        [] -> list.append(fields, [#("content", json.null())])
-        _ -> list.append(fields, [#("content", json.null())])
-      }
-    t -> list.append(fields, [#("content", json.string(t))])
+  let fields = case send_reasoning, reasoning {
+    True, r if r != "" ->
+      list.append(fields, [#("reasoning_content", json.string(r))])
+    _, _ -> fields
   }
 
   let fields = case tool_calls {
@@ -656,36 +701,32 @@ fn encode_assistant_message(
 }
 
 fn encode_tool_result(result: message.ToolResult) -> json.Json {
-  case result {
-    message.ToolResultOk(tool_call_id, _, output) ->
-      json.object([
-        #("role", json.string("tool")),
-        #("tool_call_id", json.string(tool_call_id)),
-        #("content", json.string(output)),
-      ])
-    message.ToolResultError(tool_call_id, _, error_message) ->
-      json.object([
-        #("role", json.string("tool")),
-        #("tool_call_id", json.string(tool_call_id)),
-        #("content", json.string("Error: " <> error_message)),
-      ])
+  let #(tool_call_id, content) = case result {
+    message.ToolResultOk(tool_call_id, _, output) -> #(tool_call_id, output)
+    message.ToolResultError(tool_call_id, _, error_message) -> #(
+      tool_call_id,
+      "Error: " <> error_message,
+    )
   }
+  json.object([
+    #("role", json.string("tool")),
+    #("tool_call_id", json.string(tool_call_id)),
+    #("content", json.string(content)),
+  ])
 }
 
-fn encode_tools(tools: List(provider.ToolSpec)) -> List(json.Json) {
-  list.map(tools, fn(t) {
-    json.object([
-      #("type", json.string("function")),
-      #(
-        "function",
-        json.object([
-          #("name", json.string(t.name)),
-          #("description", json.string(t.description)),
-          #("parameters", schema.to_json(t.input_schema)),
-        ]),
-      ),
-    ])
-  })
+fn encode_tool(t: provider.ToolSpec) -> json.Json {
+  json.object([
+    #("type", json.string("function")),
+    #(
+      "function",
+      json.object([
+        #("name", json.string(t.name)),
+        #("description", json.string(t.description)),
+        #("parameters", schema.to_json(t.input_schema)),
+      ]),
+    ),
+  ])
 }
 
 fn encode_tool_choice(choice: provider.ToolChoice) -> json.Json {
@@ -701,6 +742,9 @@ fn encode_tool_choice(choice: provider.ToolChoice) -> json.Json {
   }
 }
 
+/// Strict mode is only requested when the schema meets OpenAI's strict-mode
+/// rules (every object property required); otherwise the schema is sent as
+/// guidance and glean's own validation of the answer does the enforcing.
 fn encode_response_format(
   schema_opt: Option(schema.Schema),
   name_opt: Option(String),
@@ -708,18 +752,19 @@ fn encode_response_format(
   case schema_opt {
     None -> json.object([#("type", json.string("json_object"))])
     Some(s) -> {
-      let name = case name_opt {
-        None -> "response"
-        Some(n) -> n
+      let strict = schema.is_strict_compatible(s)
+      let schema_json = case strict {
+        True -> schema.to_json_strict(s)
+        False -> schema.to_json(s)
       }
       json.object([
         #("type", json.string("json_schema")),
         #(
           "json_schema",
           json.object([
-            #("name", json.string(name)),
-            #("schema", schema.to_json_strict(s)),
-            #("strict", json.bool(True)),
+            #("name", json.string(option.unwrap(name_opt, "response"))),
+            #("schema", schema_json),
+            #("strict", json.bool(strict)),
           ]),
         ),
       ])
@@ -729,51 +774,35 @@ fn encode_response_format(
 
 // --- Response decoding ---
 
-fn decode_response(
+/// Decode a non-streaming Chat Completions response body. Public for tests.
+pub fn decode_response(
   model_id: String,
   body: String,
 ) -> Result(GenerateResult, GleanError) {
-  let decoder = openai_response_decoder()
-  case json.parse(body, decoder) {
+  case json.parse(body, response_decoder()) {
     Error(_) ->
       Error(error.JsonParseError(
         input: body,
-        message: "Failed to decode OpenAI response",
+        message: "Failed to decode Chat Completions response",
       ))
-    Ok(parsed) ->
+    Ok(#(content, finish_reason, usage)) ->
       Ok(GenerateResult(
-        content: parsed.content,
-        finish_reason: parsed.finish_reason,
-        usage: parsed.usage,
+        content: content,
+        finish_reason: finish_reason,
+        usage: usage,
         model_id: model_id,
       ))
   }
 }
 
-// Internal parsed response structure
-type ParsedResponse {
-  ParsedResponse(
-    content: List(GeneratedContent),
-    finish_reason: FinishReason,
-    usage: Usage,
-  )
-}
-
-fn openai_response_decoder() -> decode.Decoder(ParsedResponse) {
-  let usage_decoder = {
-    use input_tokens <- decode.field("prompt_tokens", decode.int)
-    use output_tokens <- decode.field("completion_tokens", decode.int)
-    decode.success(Usage(
-      input_tokens: input_tokens,
-      output_tokens: output_tokens,
-    ))
-  }
-
+fn response_decoder() -> decode.Decoder(
+  #(List(GeneratedContent), FinishReason, Usage),
+) {
   let tool_call_decoder = {
     use id <- decode.field("id", decode.string)
     use function <- decode.field("function", {
       use name <- decode.field("name", decode.string)
-      use arguments <- decode.field("arguments", decode.string)
+      use arguments <- decode.optional_field("arguments", "{}", decode.string)
       decode.success(#(name, arguments))
     })
     decode.success(GeneratedToolCall(
@@ -785,46 +814,45 @@ fn openai_response_decoder() -> decode.Decoder(ParsedResponse) {
 
   let choice_decoder = {
     use message <- decode.field("message", {
-      use content <- decode.optional_field(
-        "content",
-        None,
-        decode.optional(decode.string),
-      )
+      use content <- decode.optional_field("content", "", nullable_string())
+      use reasoning <- decode.then(reasoning_decoder())
       use tool_calls <- decode.optional_field(
         "tool_calls",
-        None,
-        decode.optional(decode.list(tool_call_decoder)),
+        [],
+        nullable_list(tool_call_decoder),
       )
-      decode.success(#(content, tool_calls))
+      decode.success(#(content, reasoning, tool_calls))
     })
-    use finish_reason <- decode.field("finish_reason", decode.string)
+    use finish_reason <- decode.optional_field(
+      "finish_reason",
+      "stop",
+      nullable_string(),
+    )
     decode.success(#(message, finish_reason))
   }
 
   use choices <- decode.field("choices", decode.list(choice_decoder))
-  use usage <- decode.field("usage", usage_decoder)
+  use usage <- decode.optional_field("usage", Usage(0, 0), usage_decoder())
 
   let #(content, finish_reason) = case choices {
-    [#(message, fr), ..] -> {
-      let #(text_opt, tool_calls_opt) = message
-      let text_content = case text_opt {
-        Some(text) if text != "" -> [GeneratedText(text: text)]
-        _ -> []
+    [#(#(text, reasoning, tool_calls), fr), ..] -> {
+      let reasoning_content = case reasoning {
+        "" -> []
+        r -> [GeneratedReasoning(text: r, signature: None)]
       }
-      let tool_content = case tool_calls_opt {
-        Some(calls) -> calls
-        None -> []
+      let text_content = case text {
+        "" -> []
+        t -> [GeneratedText(text: t)]
       }
-      #(list.append(text_content, tool_content), parse_finish_reason(fr))
+      #(
+        list.flatten([reasoning_content, text_content, tool_calls]),
+        parse_finish_reason(fr),
+      )
     }
     [] -> #([], error.Stop)
   }
 
-  decode.success(ParsedResponse(
-    content: content,
-    finish_reason: finish_reason,
-    usage: usage,
-  ))
+  decode.success(#(content, finish_reason, usage))
 }
 
 fn parse_finish_reason(reason: String) -> FinishReason {

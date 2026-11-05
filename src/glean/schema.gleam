@@ -1,13 +1,22 @@
-/// JSON Schema builder for tool input/output definitions.
-/// Opaque type with explicit builder functions — no macros, no reflection.
-import gleam/dict.{type Dict}
+//// JSON Schema builder for tool input and structured output definitions.
+//// Opaque type with explicit builder functions — no macros, no reflection.
+////
+//// Schemas are sent to the model and also used to validate what the model
+//// sends back (see `validate`).
+
+import gleam/float
+import gleam/int
 import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
+import glean/error.{type ValidationError, ValidationError}
+import glean/json_value.{type JsonValue}
 
 pub opaque type Schema {
   ObjectSchema(
-    properties: Dict(String, Schema),
+    /// Kept in the order the caller wrote them.
+    properties: List(#(String, Schema)),
     required: List(String),
     description: Option(String),
   )
@@ -36,13 +45,14 @@ pub fn object(
   required required: List(String),
 ) -> Schema {
   // An empty object is valid: tools that take no arguments use it.
-  let prop_dict = dict.from_list(properties)
-  // Assert all required fields exist in properties
   let prop_names = list.map(properties, fn(p) { p.0 })
+  // Property names must be unique.
+  let assert True = list.length(list.unique(prop_names)) == list.length(prop_names)
+  // Every required field must be a declared property.
   list.each(required, fn(r) {
     let assert True = list.contains(prop_names, r)
   })
-  ObjectSchema(properties: prop_dict, required: required, description: None)
+  ObjectSchema(properties: properties, required: required, description: None)
 }
 
 pub fn string() -> Schema {
@@ -162,6 +172,34 @@ pub fn to_json_strict(schema: Schema) -> Json {
   }
 }
 
+/// Whether this schema can be sent with OpenAI's `strict: true`.
+///
+/// Strict mode needs an object at the root, every object property listed as
+/// required (optional fields are expressed with `nullable`), and no string
+/// length limits. Schemas that don't qualify are still sent, just without
+/// `strict`, and glean validates the model's output itself either way.
+pub fn is_strict_compatible(schema: Schema) -> Bool {
+  case schema {
+    ObjectSchema(..) -> strict_ok(schema)
+    _ -> False
+  }
+}
+
+fn strict_ok(schema: Schema) -> Bool {
+  case schema {
+    ObjectSchema(properties, required, _) ->
+      list.all(properties, fn(p) {
+        list.contains(required, p.0) && strict_ok(p.1)
+      })
+    StringSchema(min_length: None, max_length: None, ..) -> True
+    StringSchema(..) -> False
+    IntSchema(..) | FloatSchema(..) | BoolSchema(..) -> True
+    ArraySchema(items, _) -> strict_ok(items)
+    NullableSchema(inner) -> strict_ok(inner)
+    OneOfSchema(variants, _) -> list.all(variants, strict_ok)
+  }
+}
+
 // --- Internal JSON helpers ---
 
 fn with_description(
@@ -175,13 +213,12 @@ fn with_description(
 }
 
 fn object_to_json(
-  properties: Dict(String, Schema),
+  properties: List(#(String, Schema)),
   required: List(String),
   description: Option(String),
 ) -> Json {
   let props =
     properties
-    |> dict.to_list
     |> list.map(fn(entry) { #(entry.0, to_json(entry.1)) })
     |> json.object
 
@@ -294,13 +331,12 @@ fn type_null() -> Json {
 // --- Strict variants (with additionalProperties: false) ---
 
 fn object_to_json_strict(
-  properties: Dict(String, Schema),
+  properties: List(#(String, Schema)),
   required: List(String),
   description: Option(String),
 ) -> Json {
   let props =
     properties
-    |> dict.to_list
     |> list.map(fn(entry) { #(entry.0, to_json_strict(entry.1)) })
     |> json.object
 
@@ -333,7 +369,7 @@ fn array_to_json_strict(items: Schema, description: Option(String)) -> Json {
 
 fn nullable_to_json_strict(inner: Schema) -> Json {
   json.object([
-    #("oneOf", json.preprocessed_array([to_json_strict(inner), type_null()])),
+    #("anyOf", json.preprocessed_array([to_json_strict(inner), type_null()])),
   ])
 }
 
@@ -342,7 +378,196 @@ fn one_of_to_json_strict(
   description: Option(String),
 ) -> Json {
   let variant_jsons = list.map(variants, to_json_strict)
-  [#("oneOf", json.preprocessed_array(variant_jsons))]
+  [#("anyOf", json.preprocessed_array(variant_jsons))]
   |> with_description(description)
   |> json.object
+}
+
+// --- Validation ---
+
+/// Check a JSON value against this schema.
+///
+/// Returns every violation found, each with the path to the offending value
+/// (object keys and array indexes). Objects may carry keys the schema doesn't
+/// declare; they are not checked. Integers are accepted where a number is
+/// expected, and whole-number floats (e.g. `3.0`) where an integer is.
+pub fn validate(
+  schema: Schema,
+  value: JsonValue,
+) -> Result(Nil, List(ValidationError)) {
+  case validate_at(schema, value, []) {
+    [] -> Ok(Nil)
+    errors -> Error(errors)
+  }
+}
+
+/// Parse a JSON string and validate it against this schema.
+/// Invalid JSON is reported as a single validation error at the root.
+pub fn validate_json(
+  schema: Schema,
+  json_string: String,
+) -> Result(JsonValue, List(ValidationError)) {
+  case json.parse(json_string, json_value.decoder()) {
+    Error(_) ->
+      Error([ValidationError(path: [], message: "Input is not valid JSON")])
+    Ok(value) ->
+      case validate(schema, value) {
+        Ok(Nil) -> Ok(value)
+        Error(errors) -> Error(errors)
+      }
+  }
+}
+
+/// Errors are collected in reverse path order while walking, then each
+/// error's path is reversed once at the end.
+fn validate_at(
+  schema: Schema,
+  value: JsonValue,
+  path: List(String),
+) -> List(ValidationError) {
+  case schema, value {
+    NullableSchema(_), json_value.JsonNull -> []
+    NullableSchema(inner), _ -> validate_at(inner, value, path)
+
+    OneOfSchema(variants, _), _ ->
+      case list.any(variants, fn(v) { validate_at(v, value, path) == [] }) {
+        True -> []
+        False -> [error_at(path, "Value matches none of the allowed variants")]
+      }
+
+    ObjectSchema(properties, required, _), json_value.JsonObject(fields) -> {
+      let missing =
+        required
+        |> list.filter(fn(key) { !is_ok(list.key_find(fields, key)) })
+        |> list.map(fn(key) {
+          error_at([key, ..path], "Missing required field")
+        })
+      let nested =
+        list.flat_map(properties, fn(prop) {
+          let #(key, prop_schema) = prop
+          case list.key_find(fields, key) {
+            Ok(field_value) ->
+              validate_at(prop_schema, field_value, [key, ..path])
+            Error(Nil) -> []
+          }
+        })
+      list.append(missing, nested)
+    }
+    ObjectSchema(..), _ -> [type_error(path, "an object", value)]
+
+    StringSchema(_, enum_values, min_length, max_length),
+      json_value.JsonString(text)
+    -> {
+      let length = string.length(text)
+      let enum_errors = case enum_values {
+        Some(allowed) ->
+          case list.contains(allowed, text) {
+            True -> []
+            False -> [
+              error_at(
+                path,
+                "Must be one of: " <> string.join(allowed, ", "),
+              ),
+            ]
+          }
+        None -> []
+      }
+      let min_errors = case min_length {
+        Some(min) if length < min -> [
+          error_at(
+            path,
+            "Must be at least " <> int.to_string(min) <> " characters",
+          ),
+        ]
+        _ -> []
+      }
+      let max_errors = case max_length {
+        Some(max) if length > max -> [
+          error_at(
+            path,
+            "Must be at most " <> int.to_string(max) <> " characters",
+          ),
+        ]
+        _ -> []
+      }
+      list.flatten([enum_errors, min_errors, max_errors])
+    }
+    StringSchema(..), _ -> [type_error(path, "a string", value)]
+
+    IntSchema(_, minimum, maximum), json_value.JsonInt(n) ->
+      check_int_range(n, minimum, maximum, path)
+    IntSchema(_, minimum, maximum), json_value.JsonFloat(f) ->
+      case int.to_float(float.truncate(f)) == f {
+        True -> check_int_range(float.truncate(f), minimum, maximum, path)
+        False -> [type_error(path, "an integer", value)]
+      }
+    IntSchema(..), _ -> [type_error(path, "an integer", value)]
+
+    FloatSchema(_), json_value.JsonFloat(_) -> []
+    FloatSchema(_), json_value.JsonInt(_) -> []
+    FloatSchema(_), _ -> [type_error(path, "a number", value)]
+
+    BoolSchema(_), json_value.JsonBool(_) -> []
+    BoolSchema(_), _ -> [type_error(path, "a boolean", value)]
+
+    ArraySchema(items, _), json_value.JsonArray(elements) ->
+      elements
+      |> list.index_map(fn(element, index) {
+        validate_at(items, element, [int.to_string(index), ..path])
+      })
+      |> list.flatten
+    ArraySchema(..), _ -> [type_error(path, "an array", value)]
+  }
+}
+
+fn check_int_range(
+  n: Int,
+  minimum: Option(Int),
+  maximum: Option(Int),
+  path: List(String),
+) -> List(ValidationError) {
+  let min_errors = case minimum {
+    Some(min) if n < min -> [
+      error_at(path, "Must be at least " <> int.to_string(min)),
+    ]
+    _ -> []
+  }
+  let max_errors = case maximum {
+    Some(max) if n > max -> [
+      error_at(path, "Must be at most " <> int.to_string(max)),
+    ]
+    _ -> []
+  }
+  list.append(min_errors, max_errors)
+}
+
+fn is_ok(result: Result(a, b)) -> Bool {
+  case result {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+}
+
+fn error_at(reversed_path: List(String), message: String) -> ValidationError {
+  ValidationError(path: list.reverse(reversed_path), message: message)
+}
+
+fn type_error(
+  reversed_path: List(String),
+  expected: String,
+  value: JsonValue,
+) -> ValidationError {
+  error_at(reversed_path, "Expected " <> expected <> ", got " <> kind(value))
+}
+
+fn kind(value: JsonValue) -> String {
+  case value {
+    json_value.JsonNull -> "null"
+    json_value.JsonBool(_) -> "a boolean"
+    json_value.JsonInt(_) -> "an integer"
+    json_value.JsonFloat(_) -> "a number"
+    json_value.JsonString(_) -> "a string"
+    json_value.JsonArray(_) -> "an array"
+    json_value.JsonObject(_) -> "an object"
+  }
 }
