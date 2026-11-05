@@ -101,6 +101,32 @@ pub fn stream(
   )
 }
 
+/// Stream a run from pre-built messages (for multi-turn conversations).
+/// System prompts are handled as in `generate_messages`.
+pub fn stream_messages(
+  agent: Agent(deps),
+  deps: deps,
+  messages: List(Message),
+  on_event: fn(StreamEvent) -> Nil,
+) -> Result(RunResult, GleanError) {
+  run_stream_loop(
+    initial_state(agent, deps, prepend_system_prompts(agent, messages)),
+    on_event,
+  )
+}
+
+/// Continue a previous run with additional user input, streaming the reply.
+pub fn continue_stream(
+  agent: Agent(deps),
+  deps: deps,
+  previous: RunResult,
+  prompt: String,
+  on_event: fn(StreamEvent) -> Nil,
+) -> Result(RunResult, GleanError) {
+  let messages = list.append(previous.messages, [message.user(prompt)])
+  run_stream_loop(initial_state(agent, deps, messages), on_event)
+}
+
 /// Continue a previous run with additional user input.
 pub fn continue(
   agent: Agent(deps),

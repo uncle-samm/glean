@@ -13,7 +13,6 @@
 //// `ReasoningDelta` stream events.
 
 import gleam/dynamic/decode
-import gleam/erlang/process
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -32,7 +31,6 @@ import glean/providers/http_utils
 import glean/providers/sse
 import glean/schema
 import glean/stream.{type StreamEvent, type Usage, Usage}
-import httpp/sse as httpp_sse
 
 /// Create a Provider from an OpenAI-compatible config.
 pub fn create(
@@ -101,94 +99,69 @@ fn do_stream(
     ..list.map(config.headers, fn(h) { #(h.0, h.1) })
   ]
 
-  case
-    sse.start_stream(
-      config.base_url <> "/chat/completions",
-      headers,
-      body,
-      config.timeout_ms,
-    )
-  {
-    Error(msg) ->
-      Error(error.ProviderError(
-        provider: provider_name,
-        model: config.model,
-        status: 0,
-        message: "Streaming failed: " <> msg,
-      ))
-    Ok(#(event_subject, manager_subject)) -> {
-      use final_acc <- result.try(stream_loop(
-        event_subject,
-        manager_subject,
-        new_stream_accumulator(),
-        on_event,
-        provider_name,
-        config.model,
-        config.timeout_ms,
-      ))
-      Ok(GenerateResult(
-        content: accumulated_content(final_acc),
-        finish_reason: final_acc.finish_reason,
-        usage: final_acc.usage,
-        model_id: config.model,
-      ))
-    }
-  }
+  let events =
+    sse.start(config, config.base_url <> "/chat/completions", headers, body)
+  use final_acc <- result.try(stream_loop(
+    events,
+    new_stream_accumulator(),
+    on_event,
+    provider_name,
+    config.model,
+    config.timeout_ms,
+  ))
+  Ok(GenerateResult(
+    content: accumulated_content(final_acc),
+    finish_reason: final_acc.finish_reason,
+    usage: final_acc.usage,
+    model_id: config.model,
+  ))
 }
 
 /// Receive SSE events until the stream completes.
 ///
 /// Returns an error — never a partial success — when the stream times out,
-/// closes before the provider signalled completion, or carries an error
-/// payload. The SSE client does not expose the HTTP status, so a non-2xx
-/// response (e.g. 401, 429) shows up here as a stream that closes without
-/// ever finishing.
+/// gets a non-2xx response, closes before the provider signalled
+/// completion, or carries an error payload.
 ///
-/// Public so tests can drive it with hand-made subjects.
+/// Public so tests can drive it with `sse.from_events`.
 pub fn stream_loop(
-  subject: process.Subject(httpp_sse.SSEEvent),
-  manager: process.Subject(httpp_sse.SSEManagerMessage),
+  events: sse.Stream,
   acc: StreamAccumulator,
   on_event: fn(StreamEvent) -> Nil,
   provider_name: String,
   model: String,
   timeout_ms: Int,
 ) -> Result(StreamAccumulator, GleanError) {
-  case process.receive(subject, timeout_ms) {
-    Error(_) -> {
-      process.send(manager, httpp_sse.Shutdown)
-      Error(error.Timeout(after_ms: timeout_ms))
-    }
-    Ok(httpp_sse.Closed) ->
+  let fail = fn(status, message) {
+    Error(error.ProviderError(
+      provider: provider_name,
+      model: model,
+      status: status,
+      message: message,
+    ))
+  }
+  case sse.next(events, timeout_ms) {
+    Error(Nil) -> Error(error.Timeout(after_ms: timeout_ms))
+    Ok(#(sse.Closed, _)) ->
       case acc.finished {
         True -> Ok(acc)
-        False ->
-          Error(error.ProviderError(
-            provider: provider_name,
-            model: model,
-            status: 0,
-            message: "Stream closed before the response finished",
-          ))
+        False -> fail(0, "Stream closed before the response finished")
       }
-    Ok(httpp_sse.Event(_event_type, _event_id, "[DONE]")) -> {
-      process.send(manager, httpp_sse.Shutdown)
+    Ok(#(sse.HttpStatus(status, body), _)) -> fail(status, body)
+    Ok(#(sse.Failed(reason), _)) -> fail(0, "Streaming failed: " <> reason)
+    Ok(#(sse.Event(_, "[DONE]"), events)) -> {
+      sse.stop(events)
       Ok(acc)
     }
-    Ok(httpp_sse.Event(_event_type, _event_id, data)) ->
+    Ok(#(sse.Event(_, data), events)) ->
       case json.parse(data, stream_error_decoder()) {
         Ok(message) -> {
-          process.send(manager, httpp_sse.Shutdown)
-          Error(error.ProviderError(
-            provider: provider_name,
-            model: model,
-            status: 0,
-            message: message,
-          ))
+          sse.stop(events)
+          fail(0, message)
         }
         Error(_) ->
           stream_loop(
-            subject,
-            manager,
+            events,
             process_chunk(acc, data, on_event),
             on_event,
             provider_name,

@@ -17,6 +17,11 @@ jobs:
           otp-version: "29"
           gleam-version: "1.19.1"
           rebar3-version: "3"
+      # TEMPORARY: print what `gleam remove` changes so it can be committed.
+      - name: Dependency removal preview
+        run: |
+          gleam remove httpp gleam_otp
+          git diff gleam.toml manifest.toml
       - run: gleam deps download
       - run: gleam test
       - run: gleam format --check src test

@@ -3,7 +3,6 @@
 ////
 //// Run with: gleam run -m glean_bench
 
-import gleam/erlang/process
 import gleam/float
 import gleam/int
 import gleam/io
@@ -19,12 +18,12 @@ import glean/provider
 import glean/providers/anthropic
 import glean/providers/config
 import glean/providers/openai_compatible
+import glean/providers/sse
 import glean/run
 import glean/schema
 import glean/testing/function_provider
 import glean/testing/provider as test_provider
 import glean/tool
-import httpp/sse as httpp_sse
 
 pub fn main() -> Nil {
   io.println("benchmark | iterations | mean per iteration")
@@ -55,17 +54,22 @@ pub fn main() -> Nil {
     Nil
   })
 
-  bench("stream 1000 SSE chunks", 20, fn() {
-    let subject = process.new_subject()
-    let manager = process.new_subject()
-    list.each(numbers(1, 1000), fn(_) {
-      process.send(subject, httpp_sse.Event(None, None, chunk))
-    })
-    process.send(subject, httpp_sse.Event(None, None, "[DONE]"))
+  let sse_text =
+    string.repeat("data: " <> chunk <> "\n\n", 1000) <> "data: [DONE]\n\n"
+  bench("parse 1000 SSE events", 20, fn() {
+    let _ = sse.parse_events(sse_text)
+    Nil
+  })
+
+  bench("stream loop over 1000 chunks", 20, fn() {
+    let events =
+      list.append(
+        list.map(numbers(1, 1000), fn(_) { sse.Event(None, chunk) }),
+        [sse.Event(None, "[DONE]")],
+      )
     let _ =
       openai_compatible.stream_loop(
-        subject,
-        manager,
+        sse.from_events(events),
         openai_compatible.new_stream_accumulator(),
         fn(_) { Nil },
         "openai",

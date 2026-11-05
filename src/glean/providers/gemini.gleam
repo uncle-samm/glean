@@ -1,7 +1,6 @@
 /// Google Gemini provider (gemini-2.5-pro, gemini-2.5-flash, etc.)
 /// Uses the Gemini REST API format (different from OpenAI).
 import gleam/dynamic/decode
-import gleam/erlang/process
 import gleam/int
 import gleam/json
 import gleam/list
@@ -21,7 +20,6 @@ import glean/providers/http_utils
 import glean/providers/sse
 import glean/schema
 import glean/stream.{type StreamEvent, type Usage, Usage}
-import httpp/sse as httpp_sse
 
 const base_url = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -112,102 +110,85 @@ fn do_stream(
     ..list.map(config.headers, fn(h) { #(h.0, h.1) })
   ]
 
-  case sse.start_stream(url, headers, body, config.timeout_ms) {
-    Error(msg) ->
-      Error(error.ProviderError(
-        provider: "gemini",
-        model: config.model,
-        status: 0,
-        message: "Streaming failed: " <> msg,
-      ))
-    Ok(#(event_subject, manager_subject)) -> {
-      let acc =
-        GeminiStreamAccumulator(
-          text: string_tree.new(),
-          tool_calls: [],
-          finish_reason: error.Stop,
-          usage: stream.zero_usage(),
-          finished: False,
-        )
+  let events = sse.start(config, url, headers, body)
+  let acc =
+    GeminiStreamAccumulator(
+      text: string_tree.new(),
+      tool_calls: [],
+      finish_reason: error.Stop,
+      usage: stream.zero_usage(),
+      finished: False,
+    )
 
-      use final_acc <- result.try(gemini_stream_loop(
-        event_subject,
-        manager_subject,
-        acc,
-        on_event,
-        config.model,
-        config.timeout_ms,
-      ))
+  use final_acc <- result.try(gemini_stream_loop(
+    events,
+    acc,
+    on_event,
+    config.model,
+    config.timeout_ms,
+  ))
 
-      let text_content = case string_tree.to_string(final_acc.text) {
-        "" -> []
-        t -> [GeneratedText(text: t)]
-      }
-
-      let tool_content =
-        list.map(final_acc.tool_calls, fn(tc) {
-          GeneratedToolCall(
-            tool_call_id: tc.id,
-            tool_name: tc.name,
-            arguments_json: tc.args_json,
-          )
-        })
-
-      Ok(GenerateResult(
-        content: list.append(text_content, tool_content),
-        finish_reason: final_acc.finish_reason,
-        usage: final_acc.usage,
-        model_id: config.model,
-      ))
-    }
+  let text_content = case string_tree.to_string(final_acc.text) {
+    "" -> []
+    t -> [GeneratedText(text: t)]
   }
+
+  let tool_content =
+    list.map(final_acc.tool_calls, fn(tc) {
+      GeneratedToolCall(
+        tool_call_id: tc.id,
+        tool_name: tc.name,
+        arguments_json: tc.args_json,
+      )
+    })
+
+  Ok(GenerateResult(
+    content: list.append(text_content, tool_content),
+    finish_reason: final_acc.finish_reason,
+    usage: final_acc.usage,
+    model_id: config.model,
+  ))
 }
 
 /// Receive SSE events until the stream closes.
 ///
 /// Gemini ends a stream by closing the connection, so `Closed` is only a
-/// success after a chunk carrying a finishReason. Timeouts, early closes
-/// (including non-2xx responses, whose status the SSE client hides) and
-/// in-stream error payloads are returned as errors.
+/// success after a chunk carrying a finishReason. Timeouts, non-2xx
+/// responses, early closes and in-stream error payloads are returned as
+/// errors.
 fn gemini_stream_loop(
-  subject: process.Subject(httpp_sse.SSEEvent),
-  manager: process.Subject(httpp_sse.SSEManagerMessage),
+  events: sse.Stream,
   acc: GeminiStreamAccumulator,
   on_event: fn(StreamEvent) -> Nil,
   model: String,
   timeout_ms: Int,
 ) -> Result(GeminiStreamAccumulator, GleanError) {
-  case process.receive(subject, timeout_ms) {
-    Error(_) -> {
-      process.send(manager, httpp_sse.Shutdown)
-      Error(error.Timeout(after_ms: timeout_ms))
-    }
-    Ok(httpp_sse.Closed) ->
+  let fail = fn(status, message) {
+    Error(error.ProviderError(
+      provider: "gemini",
+      model: model,
+      status: status,
+      message: message,
+    ))
+  }
+  case sse.next(events, timeout_ms) {
+    Error(Nil) -> Error(error.Timeout(after_ms: timeout_ms))
+    Ok(#(sse.Closed, _)) ->
       case acc.finished {
         True -> Ok(acc)
-        False ->
-          Error(error.ProviderError(
-            provider: "gemini",
-            model: model,
-            status: 0,
-            message: "Stream closed before the response finished",
-          ))
+        False -> fail(0, "Stream closed before the response finished")
       }
-    Ok(httpp_sse.Event(_event_type, _event_id, data)) ->
+    Ok(#(sse.HttpStatus(status, body), _)) -> fail(status, body)
+    Ok(#(sse.Failed(reason), _)) -> fail(0, "Streaming failed: " <> reason)
+    Ok(#(sse.Event(_, data), events)) ->
       case json.parse(data, stream_error_decoder()) {
         Ok(message) -> {
-          process.send(manager, httpp_sse.Shutdown)
-          Error(error.ProviderError(
-            provider: "gemini",
-            model: model,
-            status: 0,
-            message: message,
-          ))
+          sse.stop(events)
+          fail(0, message)
         }
         Error(_) ->
           gemini_stream_loop(
-            subject,
-            manager,
+            events,
             process_gemini_chunk(acc, data, on_event),
             on_event,
             model,
