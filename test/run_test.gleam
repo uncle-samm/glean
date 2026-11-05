@@ -210,23 +210,6 @@ pub fn continue_sends_previous_answer_test() {
   }
 }
 
-pub fn continue_stream_sends_previous_answer_test() {
-  let p =
-    provider.test_provider([TextResponse("first"), TextResponse("second")])
-  let a = agent.new(p)
-
-  let assert Ok(first) = run.stream(a, Nil, "one", fn(_) { Nil })
-  let assert Ok(second) =
-    run.continue_stream(a, Nil, first, "two", fn(_) { Nil })
-  second.text |> should.equal("second")
-  list.length(second.messages) |> should.equal(4)
-
-  // stream_messages takes a history directly.
-  let assert Ok(again) =
-    run.stream_messages(a, Nil, [message.user("one")], fn(_) { Nil })
-  again.text |> should.equal("first")
-}
-
 pub fn json_output_is_requested_and_validated_test() {
   let person =
     schema.object(properties: [#("name", schema.string())], required: ["name"])

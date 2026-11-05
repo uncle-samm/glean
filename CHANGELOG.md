@@ -24,6 +24,8 @@ names; the compiler points at each one.
 
 ### Added
 
+- `run.stream_messages` and `run.continue_stream`: streaming versions of
+  `run.generate_messages` and `run.continue`, for multi-turn streaming.
 - Tool arguments are validated against the tool's schema before the tool
   runs; invalid arguments go back to the model as an error result.
 - Calls to unknown tools go back to the model with the list of available

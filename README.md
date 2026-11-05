@@ -188,6 +188,10 @@ let assert Ok(result2) = run.continue(my_agent, Nil, result1, "What's my name?")
 // result2.text contains "Sam"
 ```
 
+To stream a later turn, use `run.continue_stream`, which takes the same
+`on_event` callback as `run.stream`. `run.generate_messages` and
+`run.stream_messages` take a message history you built yourself.
+
 ### Dependency injection
 
 Tools receive a typed `deps` value — inject database connections, HTTP clients, config, or any state your tools need:
