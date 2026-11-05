@@ -5,6 +5,8 @@ A Gleam framework for building AI agents. Think [Vercel AI SDK](https://github.c
 [![Package Version](https://img.shields.io/hexpm/v/glean)](https://hex.pm/packages/glean)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/glean/)
 
+> **A personal project.** I built glean mainly for my own use and share it in case it's useful to you. There's no support or roadmap promise, and I may not get to issues quickly. Pull requests are welcome, and so is forking it to make it your own.
+
 ## Features
 
 - **Type-safe model builders** — each model only exposes its supported parameters. The compiler catches unsupported settings.
