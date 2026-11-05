@@ -74,8 +74,9 @@ names; the compiler points at each one.
   OpenAI o1 and GPT-5 "pro" models (Responses API only).
 - DeepSeek base URL is `https://api.deepseek.com`; MiniMax base URL is
   `https://api.minimax.io/v1`.
-- `make release` runs the format check and tests first, and the publish
-  script reads `HEXPM_API_KEY` from the environment instead of a file.
+- `make release` runs the format check and tests first. The publish script
+  takes `HEXPM_API_KEY` from the environment and falls back to
+  `.hex_api_key`.
 
 ## 0.1.0
 

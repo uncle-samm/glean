@@ -471,7 +471,7 @@ gleam run -m glean_bench   # Micro-benchmarks (encoding, decoding, validation, r
 make release
 ```
 
-`gleam publish` asks for your Hex credentials, or reads `HEXPM_API_KEY` from the environment.
+The publish step reads `HEXPM_API_KEY` from the environment, or the git-ignored `.hex_api_key` file.
 
 ## License
 
