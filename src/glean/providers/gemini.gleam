@@ -7,6 +7,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/string
 import gleam/string_tree
 import glean/error.{type FinishReason, type GleanError}
@@ -63,8 +64,7 @@ fn do_generate(
     config.base_url
     <> "/models/"
     <> config.model
-    <> ":generateContent?key="
-    <> config.api_key
+    <> ":generateContent"
 
   case make_http_request(config, url, body) {
     Error(err) -> Error(err)
@@ -80,6 +80,8 @@ type GeminiStreamAccumulator {
     tool_calls: List(GeminiStreamToolCall),
     finish_reason: FinishReason,
     usage: Usage,
+    /// True once a chunk carrying a finishReason has been seen.
+    finished: Bool,
   )
 }
 
@@ -97,12 +99,14 @@ fn do_stream(
     config.base_url
     <> "/models/"
     <> config.model
-    <> ":streamGenerateContent?key="
-    <> config.api_key
-    <> "&alt=sse"
+    <> ":streamGenerateContent?alt=sse"
 
-  // Gemini uses API key in URL, no auth headers needed
-  let headers = list.map(config.headers, fn(h) { #(h.0, h.1) })
+  // The API key goes in a header, never the URL, so it can't leak into
+  // logs, proxies, or error messages.
+  let headers = [
+    #("x-goog-api-key", config.api_key),
+    ..list.map(config.headers, fn(h) { #(h.0, h.1) })
+  ]
 
   case sse.start_stream(url, headers, body, config.timeout_ms) {
     Error(msg) ->
@@ -119,16 +123,17 @@ fn do_stream(
           tool_calls: [],
           finish_reason: error.Stop,
           usage: stream.zero_usage(),
+          finished: False,
         )
 
-      let final_acc =
-        gemini_stream_loop(
-          event_subject,
-          manager_subject,
-          acc,
-          on_event,
-          config.timeout_ms,
-        )
+      use final_acc <- result.try(gemini_stream_loop(
+        event_subject,
+        manager_subject,
+        acc,
+        on_event,
+        config.model,
+        config.timeout_ms,
+      ))
 
       let text_content = case string_tree.to_string(final_acc.text) {
         "" -> []
@@ -154,24 +159,71 @@ fn do_stream(
   }
 }
 
+/// Receive SSE events until the stream closes.
+///
+/// Gemini ends a stream by closing the connection, so `Closed` is only a
+/// success after a chunk carrying a finishReason. Timeouts, early closes
+/// (including non-2xx responses, whose status the SSE client hides) and
+/// in-stream error payloads are returned as errors.
 fn gemini_stream_loop(
   subject: process.Subject(httpp_sse.SSEEvent),
   manager: process.Subject(httpp_sse.SSEManagerMessage),
   acc: GeminiStreamAccumulator,
   on_event: fn(StreamEvent) -> Nil,
+  model: String,
   timeout_ms: Int,
-) -> GeminiStreamAccumulator {
+) -> Result(GeminiStreamAccumulator, GleanError) {
   case process.receive(subject, timeout_ms) {
     Error(_) -> {
       process.send(manager, httpp_sse.Shutdown)
-      acc
+      Error(error.Timeout(after_ms: timeout_ms))
     }
-    Ok(httpp_sse.Closed) -> acc
-    Ok(httpp_sse.Event(_event_type, _event_id, data)) -> {
-      let new_acc = process_gemini_chunk(acc, data, on_event)
-      gemini_stream_loop(subject, manager, new_acc, on_event, timeout_ms)
-    }
+    Ok(httpp_sse.Closed) ->
+      case acc.finished {
+        True -> Ok(acc)
+        False ->
+          Error(error.ProviderError(
+            provider: "gemini",
+            model: model,
+            status: 0,
+            message: "Stream closed before the response finished",
+          ))
+      }
+    Ok(httpp_sse.Event(_event_type, _event_id, data)) ->
+      case json.parse(data, stream_error_decoder()) {
+        Ok(message) -> {
+          process.send(manager, httpp_sse.Shutdown)
+          Error(error.ProviderError(
+            provider: "gemini",
+            model: model,
+            status: 0,
+            message: message,
+          ))
+        }
+        Error(_) ->
+          gemini_stream_loop(
+            subject,
+            manager,
+            process_gemini_chunk(acc, data, on_event),
+            on_event,
+            model,
+            timeout_ms,
+          )
+      }
   }
+}
+
+/// Decodes an in-stream error payload: `{"error": {"message": "..."}}`.
+fn stream_error_decoder() -> decode.Decoder(String) {
+  use message <- decode.field("error", {
+    use message <- decode.optional_field(
+      "message",
+      "Unknown streaming error",
+      decode.string,
+    )
+    decode.success(message)
+  })
+  decode.success(message)
 }
 
 fn process_gemini_chunk(
@@ -196,10 +248,7 @@ fn process_gemini_chunk(
             }
             provider.GeneratedReasoning(text: text) -> {
               on_event(stream.ReasoningDelta(id: "gemini", delta: text))
-              GeminiStreamAccumulator(
-                ..a,
-                text: string_tree.append(a.text, text),
-              )
+              a
             }
             GeneratedToolCall(
               tool_call_id: id,
@@ -241,6 +290,7 @@ fn process_gemini_chunk(
           GeminiStreamAccumulator(
             ..acc,
             finish_reason: parse_gemini_finish_reason(fr),
+            finished: True,
           )
       }
 
@@ -322,8 +372,9 @@ fn make_http_request(
   url: String,
   body: String,
 ) -> Result(String, GleanError) {
-  // Gemini uses API key in URL, not in Authorization header
-  http_utils.send_post(config, "gemini", url, body, [])
+  http_utils.send_post(config, "gemini", url, body, [
+    #("x-goog-api-key", config.api_key),
+  ])
 }
 
 // --- Request encoding (Gemini format) ---

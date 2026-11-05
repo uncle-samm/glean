@@ -7,6 +7,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/string_tree
 import glean/error.{type FinishReason, type GleanError}
 import glean/json_value
@@ -117,14 +118,14 @@ fn do_stream(
           current_block_type: "",
         )
 
-      let final_acc =
-        anthropic_stream_loop(
-          event_subject,
-          manager_subject,
-          acc,
-          on_event,
-          config.timeout_ms,
-        )
+      use final_acc <- result.try(anthropic_stream_loop(
+        event_subject,
+        manager_subject,
+        acc,
+        on_event,
+        config.model,
+        config.timeout_ms,
+      ))
 
       let text_content = case string_tree.to_string(final_acc.text) {
         "" -> []
@@ -227,37 +228,54 @@ fn encode_stream_request(
   |> json.to_string
 }
 
+/// Receive SSE events until `message_stop`.
+///
+/// Timeouts, `error` events (e.g. `overloaded_error`) and streams that
+/// close before `message_stop` are returned as errors, never as a partial
+/// success. A non-2xx response (401, 429, ...) has no SSE events, and the
+/// SSE client hides its status, so it shows up as an early close.
 fn anthropic_stream_loop(
   subject: process.Subject(httpp_sse.SSEEvent),
   manager: process.Subject(httpp_sse.SSEManagerMessage),
   acc: StreamAccumulator,
   on_event: fn(StreamEvent) -> Nil,
+  model: String,
   timeout_ms: Int,
-) -> StreamAccumulator {
+) -> Result(StreamAccumulator, GleanError) {
   case process.receive(subject, timeout_ms) {
     Error(_) -> {
       process.send(manager, httpp_sse.Shutdown)
-      acc
+      Error(error.Timeout(after_ms: timeout_ms))
     }
-    Ok(httpp_sse.Closed) -> acc
-    Ok(httpp_sse.Event(event_type, _event_id, data)) -> {
-      let new_acc =
-        process_anthropic_event(acc, event_type, data, on_event)
-      case event_type {
-        Some("message_stop") -> {
-          process.send(manager, httpp_sse.Shutdown)
-          new_acc
-        }
-        _ ->
-          anthropic_stream_loop(
-            subject,
-            manager,
-            new_acc,
-            on_event,
-            timeout_ms,
-          )
-      }
+    Ok(httpp_sse.Closed) ->
+      Error(error.ProviderError(
+        provider: "anthropic",
+        model: model,
+        status: 0,
+        message: "Stream closed before message_stop",
+      ))
+    Ok(httpp_sse.Event(Some("error"), _event_id, data)) -> {
+      process.send(manager, httpp_sse.Shutdown)
+      Error(error.ProviderError(
+        provider: "anthropic",
+        model: model,
+        status: 0,
+        message: data,
+      ))
     }
+    Ok(httpp_sse.Event(Some("message_stop"), _event_id, data)) -> {
+      process.send(manager, httpp_sse.Shutdown)
+      Ok(process_anthropic_event(acc, Some("message_stop"), data, on_event))
+    }
+    Ok(httpp_sse.Event(event_type, _event_id, data)) ->
+      anthropic_stream_loop(
+        subject,
+        manager,
+        process_anthropic_event(acc, event_type, data, on_event),
+        on_event,
+        model,
+        timeout_ms,
+      )
   }
 }
 

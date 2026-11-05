@@ -1,6 +1,7 @@
 import gleam/list
 import glean/agent
 import glean/error
+import glean/message
 import glean/run
 import glean/schema
 import glean/tool
@@ -160,6 +161,35 @@ pub fn dependency_injection_test() {
     Ok(result) -> {
       result.text |> should.equal("Done")
       result.steps |> should.equal(2)
+    }
+    Error(_) -> panic as "Expected Ok"
+  }
+}
+
+pub fn final_answer_is_kept_in_messages_test() {
+  let p = provider.test_provider([TextResponse("Hello, Sam!")])
+  let a = agent.new(p)
+
+  case run.generate(a, Nil, "Hi, I'm Sam") {
+    Ok(result) ->
+      list.last(result.messages)
+      |> should.equal(Ok(message.AssistantMessage([message.AssistantText("Hello, Sam!")])))
+    Error(_) -> panic as "Expected Ok"
+  }
+}
+
+pub fn continue_sends_previous_answer_test() {
+  // The test provider picks its response by counting assistant messages,
+  // so the second turn only gets "second" if the first answer is in history.
+  let p =
+    provider.test_provider([TextResponse("first"), TextResponse("second")])
+  let a = agent.new(p)
+
+  let assert Ok(first) = run.generate(a, Nil, "one")
+  case run.continue(a, Nil, first, "two") {
+    Ok(second) -> {
+      second.text |> should.equal("second")
+      list.length(second.messages) |> should.equal(4)
     }
     Error(_) -> panic as "Expected Ok"
   }

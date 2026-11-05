@@ -36,7 +36,7 @@ pub fn object(
   properties properties: List(#(String, Schema)),
   required required: List(String),
 ) -> Schema {
-  let assert True = !list.is_empty(properties)
+  // An empty object is valid: tools that take no arguments use it.
   let prop_dict = dict.from_list(properties)
   // Assert all required fields exist in properties
   let prop_names = list.map(properties, fn(p) { p.0 })

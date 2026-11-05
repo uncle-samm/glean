@@ -204,7 +204,7 @@ fn process_generate_result(
       let text = extract_text(result.content)
       Ok(RunResult(
         text: text,
-        messages: state.messages,
+        messages: append_assistant_message(state.messages, result.content),
         content: result.content,
         usage: new_usage,
         finish_reason: result.finish_reason,
@@ -215,25 +215,8 @@ fn process_generate_result(
     // Tool calls present — execute them and loop
     _ -> {
       // Add assistant message with tool calls
-      let assistant_content =
-        result.content
-        |> list.map(fn(c) {
-          case c {
-            GeneratedToolCall(id, name, args) ->
-              message.AssistantToolCall(
-                tool_call_id: id,
-                tool_name: name,
-                arguments_json: args,
-              )
-            GeneratedText(text) -> message.AssistantText(text)
-            provider.GeneratedReasoning(text) ->
-              message.AssistantReasoning(text)
-          }
-        })
       let messages_with_assistant =
-        list.append(state.messages, [
-          message.AssistantMessage(content: assistant_content),
-        ])
+        append_assistant_message(state.messages, result.content)
 
       // Execute each tool call
       case execute_tool_calls(state, tool_calls) {
@@ -319,7 +302,7 @@ fn process_stream_result(
       ))
       Ok(RunResult(
         text: text,
-        messages: state.messages,
+        messages: append_assistant_message(state.messages, result.content),
         content: result.content,
         usage: new_usage,
         finish_reason: result.finish_reason,
@@ -328,25 +311,8 @@ fn process_stream_result(
       ))
     }
     _ -> {
-      let assistant_content =
-        result.content
-        |> list.map(fn(c) {
-          case c {
-            GeneratedToolCall(id, name, args) ->
-              message.AssistantToolCall(
-                tool_call_id: id,
-                tool_name: name,
-                arguments_json: args,
-              )
-            GeneratedText(text) -> message.AssistantText(text)
-            provider.GeneratedReasoning(text) ->
-              message.AssistantReasoning(text)
-          }
-        })
       let messages_with_assistant =
-        list.append(state.messages, [
-          message.AssistantMessage(content: assistant_content),
-        ])
+        append_assistant_message(state.messages, result.content)
 
       case execute_tool_calls_with_events(state, tool_calls, on_event) {
         Error(err) -> Error(err)
@@ -368,6 +334,39 @@ fn process_stream_result(
           )
         }
       }
+    }
+  }
+}
+
+// --- Internal: history ---
+
+/// Append the model's response to the conversation history, so that
+/// `RunResult.messages` holds the full conversation (including the final
+/// answer) and `continue` sends it back to the model.
+fn append_assistant_message(
+  messages: List(Message),
+  content: List(GeneratedContent),
+) -> List(Message) {
+  case content {
+    [] -> messages
+    _ -> {
+      let assistant_content =
+        list.map(content, fn(c) {
+          case c {
+            GeneratedToolCall(id, name, args) ->
+              message.AssistantToolCall(
+                tool_call_id: id,
+                tool_name: name,
+                arguments_json: args,
+              )
+            GeneratedText(text) -> message.AssistantText(text)
+            provider.GeneratedReasoning(text) ->
+              message.AssistantReasoning(text)
+          }
+        })
+      list.append(messages, [
+        message.AssistantMessage(content: assistant_content),
+      ])
     }
   }
 }
