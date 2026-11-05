@@ -65,7 +65,11 @@ fn lacks(haystack: String, needle: String) -> Nil {
 
 pub fn anthropic_replays_signed_thinking_only_test() {
   let assert Ok(body) =
-    anthropic.encode_request("m", request(history(), provider.TextFormat), False)
+    anthropic.encode_request(
+      "m",
+      request(history(), provider.TextFormat),
+      False,
+    )
   contains(
     body,
     "{\"type\":\"thinking\",\"thinking\":\"thinking hard\",\"signature\":\"sig-1\"}",
@@ -161,7 +165,10 @@ pub fn openai_strict_only_for_strict_compatible_schemas_test() {
   let body =
     openai_compatible.encode_request(
       cfg,
-      request([message.user("hi")], provider.JsonFormat(Some(optional_age), None)),
+      request(
+        [message.user("hi")],
+        provider.JsonFormat(Some(optional_age), None),
+      ),
       False,
     )
   contains(body, "\"strict\":false")
