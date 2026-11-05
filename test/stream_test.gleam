@@ -1,8 +1,12 @@
+import gleam/erlang/process
+import gleam/int
 import gleam/list
 import glean/agent
+import glean/message
 import glean/run
 import glean/schema
 import glean/stream
+import glean/testing/function_provider
 import glean/testing/provider.{ScriptedToolCall, TextResponse, ToolCallResponse}
 import glean/tool
 import gleeunit/should
@@ -97,4 +101,101 @@ pub fn stream_with_tool_calls_test() {
     }
     Error(_) -> panic as "Expected Ok"
   }
+}
+
+pub fn continue_stream_sends_previous_answer_test() {
+  // The test provider picks its response by counting assistant messages,
+  // so the second turn only gets "second" if the first answer is in history.
+  let p =
+    provider.test_provider([TextResponse("first"), TextResponse("second")])
+  let a = agent.new(p)
+
+  let assert Ok(first) = run.stream(a, Nil, "one", fn(_event) { Nil })
+  case run.continue_stream(a, Nil, first, "two", fn(_event) { Nil }) {
+    Ok(second) -> {
+      second.text |> should.equal("second")
+      list.length(second.messages) |> should.equal(4)
+    }
+    Error(_) -> panic as "Expected Ok"
+  }
+}
+
+pub fn continue_stream_passes_events_to_callback_test() {
+  let p =
+    provider.test_provider([
+      TextResponse("first"),
+      ToolCallResponse([
+        ScriptedToolCall(id: "c1", name: "add", arguments: "{\"a\":1}"),
+      ]),
+      TextResponse("Result: 1"),
+    ])
+  let add_tool =
+    tool.new(
+      name: "add",
+      description: "Add",
+      input_schema: schema.object(properties: [#("a", schema.int())], required: [
+        "a",
+      ]),
+      execute: fn(_ctx, _args) { Ok("1") },
+    )
+  let a =
+    agent.new(p)
+    |> agent.tools(tool.toolset([add_tool]))
+  let events = process.new_subject()
+
+  let assert Ok(first) = run.generate(a, Nil, "one")
+  let assert Ok(second) =
+    run.continue_stream(a, Nil, first, "Add 1", fn(event) {
+      process.send(events, event)
+    })
+  second.text |> should.equal("Result: 1")
+  drain(events, [])
+  |> list.contains(stream.ToolResultEvent(
+    tool_call_id: "c1",
+    tool_name: "add",
+    output: "1",
+  ))
+  |> should.be_true
+}
+
+fn drain(
+  events: process.Subject(stream.StreamEvent),
+  acc: List(stream.StreamEvent),
+) -> List(stream.StreamEvent) {
+  case process.receive(events, 0) {
+    Ok(event) -> drain(events, [event, ..acc])
+    Error(Nil) -> list.reverse(acc)
+  }
+}
+
+pub fn stream_messages_does_not_duplicate_system_prompts_test() {
+  let p =
+    function_provider.function_provider("test", fn(request) {
+      Ok(provider.text_result(int.to_string(list.length(request.messages))))
+    })
+  let a = agent.new(p) |> agent.system("Be brief.")
+
+  let assert Ok(first) = run.stream(a, Nil, "Hi", fn(_event) { Nil })
+  // [system, user, assistant] + [user] = 4 messages, not 5
+  let assert Ok(second) =
+    run.stream_messages(
+      a,
+      Nil,
+      list.append(first.messages, [message.user("Again")]),
+      fn(_event) { Nil },
+    )
+  second.text |> should.equal("4")
+}
+
+pub fn stream_messages_adds_system_prompts_to_fresh_history_test() {
+  let p =
+    function_provider.function_provider("test", fn(request) {
+      Ok(provider.text_result(int.to_string(list.length(request.messages))))
+    })
+  let a = agent.new(p) |> agent.system("Be brief.")
+
+  // [system] + [user] = 2 messages
+  let assert Ok(result) =
+    run.stream_messages(a, Nil, [message.user("Hi")], fn(_event) { Nil })
+  result.text |> should.equal("2")
 }
