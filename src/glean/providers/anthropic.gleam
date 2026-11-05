@@ -5,7 +5,6 @@
 //// requires when thinking and tool use are combined.
 
 import gleam/dynamic/decode
-import gleam/erlang/process
 import gleam/int
 import gleam/json
 import gleam/list
@@ -25,7 +24,6 @@ import glean/providers/http_utils
 import glean/providers/sse
 import glean/schema
 import glean/stream.{type StreamEvent, type Usage, Usage}
-import httpp/sse as httpp_sse
 
 const base_url = "https://api.anthropic.com/v1"
 
@@ -130,44 +128,26 @@ fn do_stream(
       list.map(config.headers, fn(h) { #(h.0, h.1) }),
     )
 
-  case
-    sse.start_stream(
-      config.base_url <> "/messages",
-      headers,
-      body,
-      config.timeout_ms,
+  let events = sse.start(config, config.base_url <> "/messages", headers, body)
+  let acc =
+    StreamAccumulator(
+      blocks: [],
+      finish_reason: error.Stop,
+      usage: stream.zero_usage(),
     )
-  {
-    Error(msg) ->
-      Error(error.ProviderError(
-        provider: "anthropic",
-        model: config.model,
-        status: 0,
-        message: "Streaming failed: " <> msg,
-      ))
-    Ok(#(event_subject, manager_subject)) -> {
-      let acc =
-        StreamAccumulator(
-          blocks: [],
-          finish_reason: error.Stop,
-          usage: stream.zero_usage(),
-        )
-      use final_acc <- result.try(anthropic_stream_loop(
-        event_subject,
-        manager_subject,
-        acc,
-        on_event,
-        config.model,
-        config.timeout_ms,
-      ))
-      Ok(GenerateResult(
-        content: blocks_to_content(list.reverse(final_acc.blocks)),
-        finish_reason: final_acc.finish_reason,
-        usage: final_acc.usage,
-        model_id: config.model,
-      ))
-    }
-  }
+  use final_acc <- result.try(anthropic_stream_loop(
+    events,
+    acc,
+    on_event,
+    config.model,
+    config.timeout_ms,
+  ))
+  Ok(GenerateResult(
+    content: blocks_to_content(list.reverse(final_acc.blocks)),
+    finish_reason: final_acc.finish_reason,
+    usage: final_acc.usage,
+    model_id: config.model,
+  ))
 }
 
 fn blocks_to_content(blocks: List(#(Int, Block))) -> List(GeneratedContent) {
@@ -204,47 +184,40 @@ fn blocks_to_content(blocks: List(#(Int, Block))) -> List(GeneratedContent) {
 
 /// Receive SSE events until `message_stop`.
 ///
-/// Timeouts, `error` events (e.g. `overloaded_error`) and streams that
-/// close before `message_stop` are returned as errors, never as a partial
-/// success. A non-2xx response (401, 429, ...) has no SSE events, and the
-/// SSE client hides its status, so it shows up as an early close.
+/// Timeouts, non-2xx responses, `error` events (e.g. `overloaded_error`)
+/// and streams that close before `message_stop` are returned as errors,
+/// never as a partial success.
 fn anthropic_stream_loop(
-  subject: process.Subject(httpp_sse.SSEEvent),
-  manager: process.Subject(httpp_sse.SSEManagerMessage),
+  events: sse.Stream,
   acc: StreamAccumulator,
   on_event: fn(StreamEvent) -> Nil,
   model: String,
   timeout_ms: Int,
 ) -> Result(StreamAccumulator, GleanError) {
-  case process.receive(subject, timeout_ms) {
-    Error(_) -> {
-      process.send(manager, httpp_sse.Shutdown)
-      Error(error.Timeout(after_ms: timeout_ms))
+  let fail = fn(status, message) {
+    Error(error.ProviderError(
+      provider: "anthropic",
+      model: model,
+      status: status,
+      message: message,
+    ))
+  }
+  case sse.next(events, timeout_ms) {
+    Error(Nil) -> Error(error.Timeout(after_ms: timeout_ms))
+    Ok(#(sse.Closed, _)) -> fail(0, "Stream closed before message_stop")
+    Ok(#(sse.HttpStatus(status, body), _)) -> fail(status, body)
+    Ok(#(sse.Failed(reason), _)) -> fail(0, "Streaming failed: " <> reason)
+    Ok(#(sse.Event(Some("error"), data), events)) -> {
+      sse.stop(events)
+      fail(0, data)
     }
-    Ok(httpp_sse.Closed) ->
-      Error(error.ProviderError(
-        provider: "anthropic",
-        model: model,
-        status: 0,
-        message: "Stream closed before message_stop",
-      ))
-    Ok(httpp_sse.Event(Some("error"), _event_id, data)) -> {
-      process.send(manager, httpp_sse.Shutdown)
-      Error(error.ProviderError(
-        provider: "anthropic",
-        model: model,
-        status: 0,
-        message: data,
-      ))
-    }
-    Ok(httpp_sse.Event(Some("message_stop"), _event_id, _data)) -> {
-      process.send(manager, httpp_sse.Shutdown)
+    Ok(#(sse.Event(Some("message_stop"), _), events)) -> {
+      sse.stop(events)
       Ok(acc)
     }
-    Ok(httpp_sse.Event(event_type, _event_id, data)) ->
+    Ok(#(sse.Event(event_type, data), events)) ->
       anthropic_stream_loop(
-        subject,
-        manager,
+        events,
         process_anthropic_event(acc, event_type, data, on_event),
         on_event,
         model,
