@@ -8,7 +8,7 @@ import gleam/httpc
 import gleam/int
 import gleam/io
 import gleam/json
-import gleam/option.{None, Some}
+import gleam/option.{Some}
 import gleam/string
 import glean/agent
 import glean/error

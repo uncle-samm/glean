@@ -169,6 +169,7 @@ fn run_loop(state: RunState(deps)) -> Result(RunResult, GleanError) {
       Error(MaxStepsExceeded(
         max_steps: state.agent.max_steps,
         steps_taken: state.step,
+        messages: state.messages,
       ))
     False ->
       case state.agent.provider.generate(build_request(state)) {
@@ -194,6 +195,7 @@ fn run_stream_loop(
       Error(MaxStepsExceeded(
         max_steps: state.agent.max_steps,
         steps_taken: state.step,
+        messages: state.messages,
       ))
     False -> {
       on_event(stream.StepStart(step: state.step))

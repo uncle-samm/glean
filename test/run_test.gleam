@@ -91,7 +91,12 @@ pub fn max_steps_exceeded_test() {
     Ok(_) -> panic as "Expected error"
     Error(err) ->
       case err {
-        error.MaxStepsExceeded(max_steps, _) -> max_steps |> should.equal(3)
+        error.MaxStepsExceeded(max_steps:, messages:, ..) -> {
+          max_steps |> should.equal(3)
+          // The partial conversation is kept: the prompt, then 3 rounds of
+          // assistant tool call + tool result.
+          list.length(messages) |> should.equal(7)
+        }
         _ -> panic as "Expected MaxStepsExceeded"
       }
   }

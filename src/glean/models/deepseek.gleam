@@ -95,7 +95,7 @@ fn new(key: String, model_id: String) -> Deepseek {
   Deepseek(
     config: 
   deepseek_provider.default_config(api_key: key, model: model_id)
-  |> config.extra_body_field(_, "thinking", json.object([#("type", json.string("disabled"))]))
+  |> config.extra_body_field("thinking", json.object([#("type", json.string("disabled"))]))
   ,
     settings: provider.default_settings(),
   )

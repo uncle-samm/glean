@@ -58,7 +58,7 @@ pub fn main() -> Nil {
   bench("stream 1000 SSE chunks", 20, fn() {
     let subject = process.new_subject()
     let manager = process.new_subject()
-    list.each(list.range(1, 1000), fn(_) {
+    list.each(numbers(1, 1000), fn(_) {
       process.send(subject, httpp_sse.Event(None, None, chunk))
     })
     process.send(subject, httpp_sse.Event(None, None, "[DONE]"))
@@ -115,7 +115,7 @@ fn repeat(times: Int, f: fn() -> Nil) -> Nil {
 
 fn history_request(n: Int) -> provider.GenerateRequest {
   let messages =
-    list.range(1, n)
+    numbers(1, n)
     |> list.map(fn(i) {
       case i % 2 {
         0 -> message.assistant("Answer number " <> int.to_string(i))
@@ -172,7 +172,7 @@ fn person_json(n: Int) -> String {
   json.object([
     #(
       "people",
-      json.array(list.range(1, n), fn(i) {
+      json.array(numbers(1, n), fn(i) {
         json.object([
           #("name", json.string("Person " <> int.to_string(i))),
           #("age", json.int(i)),
@@ -216,4 +216,16 @@ fn tool_loop_agent(steps: Int) -> agent.Agent(Nil) {
   agent.new(p)
   |> agent.tools(tool.toolset([echo_tool]))
   |> agent.max_steps(steps + 1)
+}
+
+/// The integers from `from` to `to`, inclusive.
+fn numbers(from: Int, to: Int) -> List(Int) {
+  numbers_loop(to, from, [])
+}
+
+fn numbers_loop(current: Int, from: Int, acc: List(Int)) -> List(Int) {
+  case current < from {
+    True -> acc
+    False -> numbers_loop(current - 1, from, [current, ..acc])
+  }
 }

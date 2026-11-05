@@ -579,7 +579,7 @@ fn encode_model_part(
       Ok(json.object([#("text", json.string(text)), #("thought", json.bool(True))]))
     message.AssistantRedactedReasoning(_) -> Error(Nil)
     message.AssistantToolCall(id, name, args_json) -> {
-      let args = json_value.parse_to_json(args_json)
+      let args = json_value.arguments_to_object(args_json)
       let fc =
         json.object([
           #("name", json.string(name)),
@@ -750,9 +750,12 @@ fn part_decoder() -> decode.Decoder(Option(GeneratedContent)) {
 fn function_call_part_decoder() -> decode.Decoder(GeneratedContent) {
   use fc <- decode.field("functionCall", {
     use name <- decode.field("name", decode.string)
-    use args <- decode.field("args", decode.dynamic)
-    let args_json = json_value.dynamic_to_string(args)
-    decode.success(#(name, args_json))
+    use args <- decode.optional_field(
+      "args",
+      json_value.JsonObject([]),
+      json_value.decoder(),
+    )
+    decode.success(#(name, json_value.to_string(args)))
   })
   // thoughtSignature is at the part level, sibling to functionCall
   use thought_sig <- decode.optional_field(

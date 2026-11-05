@@ -75,7 +75,7 @@ fn new(key: String, model_id: String) -> DeepseekReasoning {
   DeepseekReasoning(
     config: 
   deepseek_provider.default_config(api_key: key, model: model_id)
-  |> config.extra_body_field(_, "thinking", json.object([#("type", json.string("enabled"))]))
+  |> config.extra_body_field("thinking", json.object([#("type", json.string("enabled"))]))
   ,
     settings: provider.default_settings(),
   )

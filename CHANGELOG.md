@@ -15,6 +15,12 @@ names; the compiler points at each one.
 - Schema properties keep the order you wrote them in.
 - The Gemini API key is sent in the `x-goog-api-key` header instead of the URL.
 - HTTP failures now say why they failed instead of "HTTP request failed".
+- `MaxStepsExceeded` carries the conversation so far (`messages`), so the
+  work done before the limit isn't lost.
+- Tool arguments that aren't a JSON object are sent back to Anthropic and
+  Gemini wrapped as `{"invalid_arguments": "..."}` instead of being replaced
+  by `{}`; Gemini tool arguments are decoded without going through
+  `Dynamic`.
 
 ### Added
 

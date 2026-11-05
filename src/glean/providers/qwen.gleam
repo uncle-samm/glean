@@ -15,7 +15,7 @@ pub fn default_config(
 ) -> ProviderConfig {
   config.new(api_key: api_key, model: model)
   |> config.base_url(base_url)
-  |> config.stream_usage(_, True)
+  |> config.stream_usage(True)
 }
 
 /// Create a Qwen provider (international endpoint).

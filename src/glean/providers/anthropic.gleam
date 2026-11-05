@@ -714,7 +714,7 @@ fn encode_assistant_content(
           #("type", json.string("tool_use")),
           #("id", json.string(id)),
           #("name", json.string(name)),
-          #("input", json_value.parse_to_json(args_json)),
+          #("input", json_value.arguments_to_object(args_json)),
         ]),
       )
   }

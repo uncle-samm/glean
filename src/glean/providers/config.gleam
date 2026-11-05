@@ -1,7 +1,7 @@
 //// Provider configuration shared by all provider implementations.
 ////
 //// Model builders expose this through their `configure` function, e.g.
-//// `anthropic.sonnet_5(key) |> anthropic.configure(config.timeout(_, 120_000))`.
+//// `anthropic.sonnet_5_5(key) |> anthropic.configure(config.timeout(_, 120_000))`.
 
 import gleam/json.{type Json}
 import gleam/list

@@ -2,6 +2,7 @@
 /// Every error is explicitly typed and must be handled — never silently swallowed.
 import gleam/int
 import gleam/string
+import glean/message.{type Message}
 
 pub type GleanError {
   /// Provider returned a non-200 status or network failure
@@ -19,7 +20,9 @@ pub type GleanError {
   /// Output validation failed
   OutputValidationError(errors: List(ValidationError))
   /// Max steps exceeded in the agent loop
-  MaxStepsExceeded(max_steps: Int, steps_taken: Int)
+  /// The conversation so far, including every tool call and result, so it
+  /// can be inspected or resumed with `run.generate_messages`.
+  MaxStepsExceeded(max_steps: Int, steps_taken: Int, messages: List(Message))
   /// JSON parsing failed
   JsonParseError(input: String, message: String)
   /// Request timed out
@@ -50,7 +53,7 @@ pub fn to_string(error: GleanError) -> String {
     ToolInputValidationError(name, _, _) ->
       "ToolInputValidationError(" <> name <> ")"
     OutputValidationError(_) -> "OutputValidationError"
-    MaxStepsExceeded(max, taken) ->
+    MaxStepsExceeded(max, taken, _) ->
       "MaxStepsExceeded(max="
       <> int.to_string(max)
       <> ", taken="
