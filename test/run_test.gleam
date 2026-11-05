@@ -1,9 +1,13 @@
+import gleam/int
 import gleam/list
+import gleam/option.{None, Some}
 import glean/agent
 import glean/error
 import glean/message
+import glean/provider as provider_types
 import glean/run
 import glean/schema
+import glean/testing/function_provider
 import glean/testing/provider.{ScriptedToolCall, TextResponse, ToolCallResponse}
 import glean/tool
 import gleeunit/should
@@ -87,7 +91,12 @@ pub fn max_steps_exceeded_test() {
     Ok(_) -> panic as "Expected error"
     Error(err) ->
       case err {
-        error.MaxStepsExceeded(max_steps, _) -> max_steps |> should.equal(3)
+        error.MaxStepsExceeded(max_steps:, messages:, ..) -> {
+          max_steps |> should.equal(3)
+          // The partial conversation is kept: the prompt, then 3 rounds of
+          // assistant tool call + tool result.
+          list.length(messages) |> should.equal(7)
+        }
         _ -> panic as "Expected MaxStepsExceeded"
       }
   }
@@ -199,4 +208,62 @@ pub fn continue_sends_previous_answer_test() {
     }
     Error(_) -> panic as "Expected Ok"
   }
+}
+
+pub fn json_output_is_requested_and_validated_test() {
+  let person =
+    schema.object(properties: [#("name", schema.string())], required: ["name"])
+  let p =
+    function_provider.function_provider("test", fn(request) {
+      case request.response_format {
+        provider_types.JsonFormat(schema: Some(_), name: Some("person")) ->
+          Ok(provider.text_result("{\"name\":\"Sam\"}"))
+        _ -> Ok(provider.text_result("not json"))
+      }
+    })
+  let a =
+    agent.new(p)
+    |> agent.json_output(schema: Some(person), name: Some("person"))
+
+  let assert Ok(result) = run.generate(a, Nil, "Who?")
+  result.text |> should.equal("{\"name\":\"Sam\"}")
+}
+
+pub fn json_output_mismatch_is_an_error_test() {
+  let person =
+    schema.object(properties: [#("name", schema.string())], required: ["name"])
+  let p =
+    function_provider.function_provider("test", fn(_request) {
+      Ok(provider.text_result("{\"age\":3}"))
+    })
+  let a =
+    agent.new(p)
+    |> agent.json_output(schema: Some(person), name: None)
+
+  case run.generate(a, Nil, "Who?") {
+    Error(error.OutputValidationError(errors)) ->
+      errors
+      |> should.equal([
+        error.ValidationError(path: ["name"], message: "Missing required field"),
+      ])
+    _ -> panic as "Expected OutputValidationError"
+  }
+}
+
+pub fn generate_messages_does_not_duplicate_system_prompts_test() {
+  let p =
+    function_provider.function_provider("test", fn(request) {
+      Ok(provider.text_result(int.to_string(list.length(request.messages))))
+    })
+  let a = agent.new(p) |> agent.system("Be brief.")
+
+  let assert Ok(first) = run.generate(a, Nil, "Hi")
+  // [system, user, assistant] + [user] = 4 messages, not 5
+  let assert Ok(second) =
+    run.generate_messages(
+      a,
+      Nil,
+      list.append(first.messages, [message.user("Again")]),
+    )
+  second.text |> should.equal("4")
 }

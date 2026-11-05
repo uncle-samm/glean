@@ -11,7 +11,7 @@ import integration/integration_helpers.{
 
 const env_var = "QWEN_API_KEY"
 
-const model = "qwen-turbo"
+const model = "qwen3.8-flash"
 
 pub fn qwen_text_generation_test() {
   case get_api_key(env_var) {

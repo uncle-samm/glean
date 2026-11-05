@@ -11,7 +11,7 @@ import integration/integration_helpers.{
 
 const env_var = "MOONSHOT_API_KEY"
 
-const model = "kimi-k2"
+const model = "kimi-k2.6"
 
 pub fn moonshot_text_generation_test() {
   case get_api_key(env_var) {

@@ -58,21 +58,16 @@ pub fn to_string(value: JsonValue) -> String {
   to_json(value) |> json.to_string
 }
 
-/// Decode a Dynamic value to a JSON string.
-/// Used when APIs return tool arguments as objects that we need as strings.
-pub fn dynamic_to_string(value: decode.Dynamic) -> String {
-  case decode.run(value, decoder()) {
-    Ok(json_value) -> to_string(json_value)
-    Error(_) -> "{}"
-  }
-}
-
-/// Parse a JSON string and return a json.Json value for embedding.
-/// Used when we have a JSON string that needs to be embedded as an object
-/// (not a string) in outgoing JSON.
-pub fn parse_to_json(json_string: String) -> json.Json {
-  case json.parse(json_string, decoder()) {
-    Ok(json_value) -> to_json(json_value)
-    Error(_) -> json.object([])
+/// Turn a tool call's argument string into a JSON object for APIs that
+/// take arguments as an object (Anthropic `input`, Gemini `args`).
+///
+/// Arguments that aren't a JSON object can't be sent as-is. They were
+/// already reported to the model as invalid when the tool call ran, so they
+/// are sent back wrapped as `{"invalid_arguments": "<original text>"}`
+/// rather than dropped, keeping the history truthful.
+pub fn arguments_to_object(arguments_json: String) -> json.Json {
+  case json.parse(arguments_json, decoder()) {
+    Ok(JsonObject(_) as value) -> to_json(value)
+    _ -> json.object([#("invalid_arguments", json.string(arguments_json))])
   }
 }

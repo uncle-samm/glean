@@ -8,13 +8,13 @@ import gleam/httpc
 import gleam/int
 import gleam/io
 import gleam/json
-import gleam/option.{None, Some}
+import gleam/option.{Some}
 import gleam/string
 import glean/agent
 import glean/error
 import glean/message
-import glean/models/anthropic as anthropic_model
-import glean/models/openai as openai_model
+import glean/models/anthropic_sampling as anthropic_model
+import glean/models/openai_reasoning as openai_model
 import glean/provider
 import glean/providers/anthropic
 import glean/providers/openai
@@ -205,14 +205,8 @@ fn get_current_info_tool() -> tool.Tool(Nil) {
 
 fn test_settings() -> provider.ModelSettings {
   provider.ModelSettings(
+    ..provider.default_settings(),
     max_output_tokens: Some(1500),
-    temperature: None,
-    top_p: None,
-    top_k: None,
-    stop_sequences: None,
-    seed: None,
-    presence_penalty: None,
-    frequency_penalty: None,
   )
 }
 

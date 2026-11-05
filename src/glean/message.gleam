@@ -1,5 +1,9 @@
-/// Conversation message types.
-/// Discriminated union by role with typed content parts.
+//// Conversation message types.
+//// Discriminated union by role with typed content parts.
+
+import gleam/list
+import gleam/option.{type Option}
+
 pub type Message {
   SystemMessage(content: String)
   UserMessage(content: List(UserContent))
@@ -14,7 +18,13 @@ pub type UserContent {
 
 pub type AssistantContent {
   AssistantText(text: String)
-  AssistantReasoning(text: String)
+  /// Reasoning the model produced before answering. `signature` is the
+  /// provider's proof that the text is unmodified (Claude needs it to
+  /// accept the reasoning back on the next turn).
+  AssistantReasoning(text: String, signature: Option(String))
+  /// Reasoning the provider returned encrypted (Claude's redacted thinking).
+  /// It must be sent back verbatim.
+  AssistantRedactedReasoning(data: String)
   AssistantToolCall(
     tool_call_id: String,
     tool_name: String,
@@ -62,5 +72,3 @@ pub fn tool_results(results: List(ToolResult)) -> Message {
     }
   ToolResultMessage(results: results)
 }
-
-import gleam/list

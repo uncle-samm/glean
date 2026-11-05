@@ -5,7 +5,7 @@ import gleam/erlang/process
 import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import gleam/string_tree
@@ -25,6 +25,16 @@ import httpp/sse as httpp_sse
 
 const base_url = "https://generativelanguage.googleapis.com/v1beta"
 
+/// The default configuration for this provider. Change it with the
+/// `glean/providers/config` setters, then pass it to `from_config`.
+pub fn default_config(
+  api_key api_key: String,
+  model model: String,
+) -> ProviderConfig {
+  config.new(api_key: api_key, model: model)
+  |> config.base_url(base_url)
+}
+
 /// Create a Gemini provider.
 ///
 /// ## Example
@@ -33,8 +43,7 @@ const base_url = "https://generativelanguage.googleapis.com/v1beta"
 /// let provider = gemini.new(api_key: "AIza...", model: "gemini-2.5-pro")
 /// ```
 pub fn new(api_key api_key: String, model model: String) -> Provider {
-  config.new(api_key: api_key, model: model)
-  |> config.base_url(base_url)
+  default_config(api_key: api_key, model: model)
   |> from_config
 }
 
@@ -241,10 +250,11 @@ fn process_gemini_chunk(
                 text: string_tree.append(a.text, text),
               )
             }
-            provider.GeneratedReasoning(text: text) -> {
+            provider.GeneratedReasoning(text: text, ..) -> {
               on_event(stream.ReasoningDelta(id: "gemini", delta: text))
               a
             }
+            provider.GeneratedRedactedReasoning(..) -> a
             GeneratedToolCall(
               tool_call_id: id,
               tool_name: name,
@@ -300,13 +310,14 @@ type GeminiChunk {
 }
 
 fn gemini_chunk_decoder() -> decode.Decoder(GeminiChunk) {
-  let part_decoder =
-    decode.one_of(text_part_decoder(), [function_call_part_decoder()])
-
   let candidate_decoder = {
     use content <- decode.optional_field("content", [], {
-      use parts <- decode.optional_field("parts", [], decode.list(part_decoder))
-      decode.success(parts)
+      use parts <- decode.optional_field(
+        "parts",
+        [],
+        decode.list(part_decoder()),
+      )
+      decode.success(option.values(parts))
     })
     use finish_reason <- decode.optional_field(
       "finishReason",
@@ -442,6 +453,24 @@ fn encode_request(gen_request: GenerateRequest) -> String {
       ])
   }
 
+  let gen_config_fields = case gen_request.settings.seed {
+    None -> gen_config_fields
+    Some(seed) -> list.append(gen_config_fields, [#("seed", json.int(seed))])
+  }
+
+  let gen_config_fields = case gen_request.response_format {
+    provider.TextFormat -> gen_config_fields
+    provider.JsonFormat(schema: None, ..) ->
+      list.append(gen_config_fields, [
+        #("responseMimeType", json.string("application/json")),
+      ])
+    provider.JsonFormat(schema: Some(output_schema), ..) ->
+      list.append(gen_config_fields, [
+        #("responseMimeType", json.string("application/json")),
+        #("responseJsonSchema", schema.to_json(output_schema)),
+      ])
+  }
+
   let fields = case gen_config_fields {
     [] -> fields
     _ ->
@@ -492,7 +521,7 @@ fn encode_content(msg: Message) -> List(json.Json) {
         #("role", json.string("model")),
         #(
           "parts",
-          json.preprocessed_array(list.map(content, encode_model_part)),
+          json.preprocessed_array(list.filter_map(content, encode_model_part)),
         ),
       ]),
     ]
@@ -537,13 +566,25 @@ fn encode_user_part(content: message.UserContent) -> json.Json {
   }
 }
 
-fn encode_model_part(content: message.AssistantContent) -> json.Json {
+/// Reasoning goes back marked as a thought so it isn't mistaken for the
+/// answer. Encrypted reasoning from other providers has no Gemini form and
+/// is left out.
+fn encode_model_part(
+  content: message.AssistantContent,
+) -> Result(json.Json, Nil) {
   case content {
-    message.AssistantText(text) -> json.object([#("text", json.string(text))])
-    message.AssistantReasoning(text) ->
-      json.object([#("text", json.string(text))])
+    message.AssistantText(text) ->
+      Ok(json.object([#("text", json.string(text))]))
+    message.AssistantReasoning(text, _) ->
+      Ok(
+        json.object([
+          #("text", json.string(text)),
+          #("thought", json.bool(True)),
+        ]),
+      )
+    message.AssistantRedactedReasoning(_) -> Error(Nil)
     message.AssistantToolCall(id, name, args_json) -> {
-      let args = json_value.parse_to_json(args_json)
+      let args = json_value.arguments_to_object(args_json)
       let fc =
         json.object([
           #("name", json.string(name)),
@@ -560,7 +601,7 @@ fn encode_model_part(content: message.AssistantContent) -> json.Json {
         }
         False -> part_fields
       }
-      json.object(part_fields)
+      Ok(json.object(part_fields))
     }
   }
 }
@@ -642,14 +683,14 @@ fn gemini_response_decoder() -> decode.Decoder(ParsedResponse) {
     decode.success(Usage(input_tokens: prompt, output_tokens: candidates))
   }
 
-  // Parts can be text or functionCall
-  let part_decoder =
-    decode.one_of(text_part_decoder(), [function_call_part_decoder()])
-
   let candidate_decoder = {
-    use content <- decode.field("content", {
-      use parts <- decode.field("parts", decode.list(part_decoder))
-      decode.success(parts)
+    use content <- decode.optional_field("content", [], {
+      use parts <- decode.optional_field(
+        "parts",
+        [],
+        decode.list(part_decoder()),
+      )
+      decode.success(option.values(parts))
     })
     use finish_reason <- decode.optional_field(
       "finishReason",
@@ -659,7 +700,12 @@ fn gemini_response_decoder() -> decode.Decoder(ParsedResponse) {
     decode.success(#(content, finish_reason))
   }
 
-  use candidates <- decode.field("candidates", decode.list(candidate_decoder))
+  // A prompt blocked by safety filters comes back with no candidates.
+  use candidates <- decode.optional_field(
+    "candidates",
+    [],
+    decode.list(candidate_decoder),
+  )
   use usage <- decode.optional_field(
     "usageMetadata",
     Usage(input_tokens: 0, output_tokens: 0),
@@ -668,7 +714,7 @@ fn gemini_response_decoder() -> decode.Decoder(ParsedResponse) {
 
   let #(content, finish_reason) = case candidates {
     [#(parts, fr), ..] -> #(parts, parse_gemini_finish_reason(fr))
-    [] -> #([], error.Stop)
+    [] -> #([], error.ContentFilter)
   }
 
   decode.success(ParsedResponse(
@@ -678,17 +724,45 @@ fn gemini_response_decoder() -> decode.Decoder(ParsedResponse) {
   ))
 }
 
-fn text_part_decoder() -> decode.Decoder(GeneratedContent) {
-  use text <- decode.field("text", decode.string)
-  decode.success(GeneratedText(text: text))
+/// Decodes one response part. Thought parts become reasoning; part types
+/// glean doesn't use (inline images, code execution) decode to None instead
+/// of failing the whole response.
+fn part_decoder() -> decode.Decoder(Option(GeneratedContent)) {
+  use function_call <- decode.optional_field(
+    "functionCall",
+    None,
+    decode.map(decode.dynamic, Some),
+  )
+  case function_call {
+    Some(_) -> decode.map(function_call_part_decoder(), Some)
+    None -> {
+      use text <- decode.optional_field(
+        "text",
+        None,
+        decode.map(decode.string, Some),
+      )
+      use thought <- decode.optional_field("thought", False, decode.bool)
+      case text, thought {
+        Some(t), True ->
+          decode.success(
+            Some(provider.GeneratedReasoning(text: t, signature: None)),
+          )
+        Some(t), False -> decode.success(Some(GeneratedText(text: t)))
+        None, _ -> decode.success(None)
+      }
+    }
+  }
 }
 
 fn function_call_part_decoder() -> decode.Decoder(GeneratedContent) {
   use fc <- decode.field("functionCall", {
     use name <- decode.field("name", decode.string)
-    use args <- decode.field("args", decode.dynamic)
-    let args_json = json_value.dynamic_to_string(args)
-    decode.success(#(name, args_json))
+    use args <- decode.optional_field(
+      "args",
+      json_value.JsonObject([]),
+      json_value.decoder(),
+    )
+    decode.success(#(name, json_value.to_string(args)))
   })
   // thoughtSignature is at the part level, sibling to functionCall
   use thought_sig <- decode.optional_field(

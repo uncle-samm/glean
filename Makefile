@@ -1,10 +1,13 @@
-.PHONY: build test push tag publish release
+.PHONY: build test bench push tag publish release
 
 build:
 	gleam build
 
 test:
 	gleam test
+
+bench:
+	gleam run -m glean_bench
 
 push:
 	sh scripts/push.sh
@@ -15,4 +18,5 @@ tag:
 publish:
 	/usr/bin/expect scripts/publish.sh
 
-release: push tag publish
+release:
+	sh scripts/release.sh

@@ -1,157 +1,129 @@
-//// Alibaba Qwen models.
+//// Alibaba Qwen models (DashScope, international endpoint).
 ////
-//// Covers Qwen3.5, Qwen3, Qwen, QwQ, and coder variants.
-//// Supported parameters: max_output_tokens, temperature, top_p, top_k,
-//// seed, stop_sequences.
-////
-//// NO penalty parameters.
+//// Hybrid thinking models take `enable_thinking`; set it with
+//// `configure(config.extra_body_field(_, "enable_thinking", json.bool(True)))`.
+//// For the China endpoint or a workspace URL, set `config.base_url`.
 
-import gleam/option.{type Option, None, Some}
+import gleam/option.{Some}
 import glean/model.{type Model, Model}
-import glean/provider.{ModelSettings}
+import glean/provider.{type ModelSettings, ModelSettings}
+import glean/providers/config.{type ProviderConfig}
 import glean/providers/qwen as qwen_provider
 
-/// A Qwen model builder.
-/// Use one of the constructor functions to create a value, chain builder
-/// functions to set parameters, then call `build()` to get a `Model`.
+/// A Qwen model builder. Pick a model with one of the constructors
+/// (or `custom`), chain setters, then call `build()`.
 pub opaque type Qwen {
-  Qwen(
-    api_key: String,
-    model_id: String,
-    max_output_tokens: Option(Int),
-    temperature: Option(Float),
-    top_p: Option(Float),
-    top_k: Option(Int),
-    seed: Option(Int),
-    stop_sequences: Option(List(String)),
-  )
+  Qwen(config: ProviderConfig, settings: ModelSettings)
 }
 
 // ---------------------------------------------------------------------------
 // Constructors
 // ---------------------------------------------------------------------------
 
-/// Qwen3.5 Plus
+/// Qwen3.8 Max. Model ID: `qwen3.8-max`.
+pub fn qwen3_8_max(api_key key: String) -> Qwen {
+  new(key, "qwen3.8-max")
+}
+
+/// Qwen3.7 Plus. Model ID: `qwen3.7-plus`.
+pub fn qwen3_7_plus(api_key key: String) -> Qwen {
+  new(key, "qwen3.7-plus")
+}
+
+/// Qwen3.8 Flash. Model ID: `qwen3.8-flash`.
+pub fn qwen3_8_flash(api_key key: String) -> Qwen {
+  new(key, "qwen3.8-flash")
+}
+
+/// Qwen3.5 Plus. Model ID: `qwen3.5-plus`.
 pub fn qwen3_5_plus(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen3.5-plus")
+  new(key, "qwen3.5-plus")
 }
 
-/// Qwen3.5 Flash
+/// Qwen3.5 Flash. Model ID: `qwen3.5-flash`.
 pub fn qwen3_5_flash(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen3.5-flash")
+  new(key, "qwen3.5-flash")
 }
 
-/// Qwen3 Max
+/// Qwen3 Max. Model ID: `qwen3-max`.
 pub fn qwen3_max(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen3-max")
+  new(key, "qwen3-max")
 }
 
-/// Qwen3 Plus
-pub fn qwen3_plus(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen3-plus")
+/// Qwen3 Coder Plus. Model ID: `qwen3-coder-plus`.
+pub fn qwen3_coder_plus(api_key key: String) -> Qwen {
+  new(key, "qwen3-coder-plus")
 }
 
-/// Qwen Plus
-pub fn qwen_plus(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen-plus")
-}
-
-/// Qwen Max
-pub fn qwen_max(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen-max")
-}
-
-/// Qwen Turbo
-pub fn qwen_turbo(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen-turbo")
-}
-
-/// Qwen Flash
-pub fn qwen_flash(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen-flash")
-}
-
-/// QwQ Plus
+/// QwQ Plus. Model ID: `qwq-plus`.
 pub fn qwq_plus(api_key key: String) -> Qwen {
-  new_qwen(key, "qwq-plus")
+  new(key, "qwq-plus")
 }
 
-/// Qwen3 Coder
-pub fn qwen3_coder(api_key key: String) -> Qwen {
-  new_qwen(key, "qwen3-coder")
+/// Any other model ID served by this API, such as one released after this
+/// version of glean. Only this module's setters are available, so check the
+/// model accepts them.
+pub fn custom(api_key key: String, model model_id: String) -> Qwen {
+  let assert True = model_id != ""
+  new(key, model_id)
 }
 
 // ---------------------------------------------------------------------------
-// Builder functions
+// Setters
 // ---------------------------------------------------------------------------
+
+/// Change the provider configuration: base URL, timeout, headers, retries.
+///
+/// ```gleam
+/// |> configure(config.timeout(_, 120_000))
+/// ```
+pub fn configure(m: Qwen, f: fn(ProviderConfig) -> ProviderConfig) -> Qwen {
+  Qwen(..m, config: f(m.config))
+}
 
 /// Set the maximum number of output tokens.
 pub fn max_output_tokens(m: Qwen, n: Int) -> Qwen {
-  Qwen(..m, max_output_tokens: Some(n))
+  let assert True = n > 0
+  Qwen(..m, settings: ModelSettings(..m.settings, max_output_tokens: Some(n)))
 }
 
-/// Set the sampling temperature (0–2).
+/// Set the sampling temperature.
 pub fn temperature(m: Qwen, t: Float) -> Qwen {
-  Qwen(..m, temperature: Some(t))
+  Qwen(..m, settings: ModelSettings(..m.settings, temperature: Some(t)))
 }
 
 /// Set the top-p (nucleus sampling) value.
 pub fn top_p(m: Qwen, p: Float) -> Qwen {
-  Qwen(..m, top_p: Some(p))
+  Qwen(..m, settings: ModelSettings(..m.settings, top_p: Some(p)))
 }
 
-/// Set the top-k value.
+/// Set the top-k sampling value.
 pub fn top_k(m: Qwen, k: Int) -> Qwen {
-  Qwen(..m, top_k: Some(k))
+  Qwen(..m, settings: ModelSettings(..m.settings, top_k: Some(k)))
 }
 
-/// Set the random seed for deterministic generation.
+/// Set the random seed for more repeatable output.
 pub fn seed(m: Qwen, s: Int) -> Qwen {
-  Qwen(..m, seed: Some(s))
+  Qwen(..m, settings: ModelSettings(..m.settings, seed: Some(s)))
 }
 
-/// Set stop sequences — the model will stop generating when it encounters
-/// any of these strings.
+/// Stop generating when the model writes any of these strings.
 pub fn stop_sequences(m: Qwen, stops: List(String)) -> Qwen {
-  Qwen(..m, stop_sequences: Some(stops))
+  Qwen(..m, settings: ModelSettings(..m.settings, stop_sequences: Some(stops)))
 }
 
 // ---------------------------------------------------------------------------
 // Build
 // ---------------------------------------------------------------------------
 
-/// Build a `Model` from this Qwen configuration.
+/// Build a `Model` to use with `agent.new`.
 pub fn build(m: Qwen) -> Model {
-  let provider = qwen_provider.new(api_key: m.api_key, model: m.model_id)
-
-  let settings =
-    ModelSettings(
-      max_output_tokens: m.max_output_tokens,
-      temperature: m.temperature,
-      top_p: m.top_p,
-      top_k: m.top_k,
-      stop_sequences: m.stop_sequences,
-      seed: m.seed,
-      presence_penalty: None,
-      frequency_penalty: None,
-    )
-
-  Model(provider: provider, settings: settings)
+  Model(provider: qwen_provider.from_config(m.config), settings: m.settings)
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-fn new_qwen(api_key: String, model_id: String) -> Qwen {
+fn new(key: String, model_id: String) -> Qwen {
   Qwen(
-    api_key: api_key,
-    model_id: model_id,
-    max_output_tokens: None,
-    temperature: None,
-    top_p: None,
-    top_k: None,
-    seed: None,
-    stop_sequences: None,
+    config: qwen_provider.default_config(api_key: key, model: model_id),
+    settings: provider.default_settings(),
   )
 }

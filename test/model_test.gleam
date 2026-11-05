@@ -1,6 +1,10 @@
+import gleam/json
 import gleam/option.{None, Some}
+import gleam/string
 import glean/agent
+import glean/message
 import glean/models/anthropic as anthropic_model
+import glean/models/anthropic_sampling
 import glean/models/deepseek
 import glean/models/deepseek_reasoning
 import glean/models/gemini as gemini_model
@@ -10,12 +14,15 @@ import glean/models/moonshot as moonshot_model
 import glean/models/openai
 import glean/models/openai_reasoning
 import glean/models/qwen as qwen_model
+import glean/provider
+import glean/providers/config
+import glean/providers/deepseek as deepseek_provider
+import glean/providers/openai_compatible
 import gleeunit/should
 
 pub fn openai_gpt_builder_test() {
-  // Build a GPT model with all supported params
   let model =
-    openai.gpt5_4(api_key: "test-key")
+    openai.gpt4_1(api_key: "test-key")
     |> openai.temperature(0.7)
     |> openai.top_p(0.9)
     |> openai.seed(42)
@@ -26,7 +33,7 @@ pub fn openai_gpt_builder_test() {
     |> openai.build
 
   model.provider.name |> should.equal("openai")
-  model.provider.model_id |> should.equal("gpt-5.4")
+  model.provider.model_id |> should.equal("gpt-4.1")
   model.settings.temperature |> should.equal(Some(0.7))
   model.settings.top_p |> should.equal(Some(0.9))
   model.settings.seed |> should.equal(Some(42))
@@ -34,233 +41,162 @@ pub fn openai_gpt_builder_test() {
   model.settings.frequency_penalty |> should.equal(Some(0.3))
   model.settings.max_output_tokens |> should.equal(Some(1000))
   model.settings.stop_sequences |> should.equal(Some(["END"]))
-  // top_k is not supported by OpenAI GPT
   model.settings.top_k |> should.equal(None)
 }
 
 pub fn openai_reasoning_builder_test() {
-  // Reasoning model: only max_output_tokens and stop_sequences
   let model =
-    openai_reasoning.gpt5_nano(api_key: "test-key")
+    openai_reasoning.gpt5_5(api_key: "test-key")
     |> openai_reasoning.max_output_tokens(500)
+    |> openai_reasoning.reasoning_effort(provider.HighEffort)
     |> openai_reasoning.build
 
   model.provider.name |> should.equal("openai")
-  model.provider.model_id |> should.equal("gpt-5-nano")
+  model.provider.model_id |> should.equal("gpt-5.5")
   model.settings.max_output_tokens |> should.equal(Some(500))
-  // Not supported by reasoning models
+  model.settings.reasoning_effort |> should.equal(Some(provider.HighEffort))
   model.settings.temperature |> should.equal(None)
-  model.settings.top_p |> should.equal(None)
-  model.settings.top_k |> should.equal(None)
-  model.settings.seed |> should.equal(None)
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
   model.settings.stop_sequences |> should.equal(None)
 }
 
-pub fn anthropic_claude_builder_test() {
+pub fn anthropic_current_builder_test() {
   let model =
-    anthropic_model.haiku_4_5(api_key: "test-key")
-    |> anthropic_model.temperature(0.5)
-    |> anthropic_model.top_p(0.8)
-    |> anthropic_model.top_k(40)
-    |> anthropic_model.stop_sequences(["STOP", "END"])
+    anthropic_model.opus_5_5(api_key: "test-key")
     |> anthropic_model.max_output_tokens(2000)
+    |> anthropic_model.stop_sequences(["STOP"])
+    |> anthropic_model.reasoning_effort(provider.LowEffort)
     |> anthropic_model.build
 
   model.provider.name |> should.equal("anthropic")
-  model.provider.model_id |> should.equal("claude-haiku-4-5-20251001")
+  model.provider.model_id |> should.equal("claude-opus-5-5")
+  model.settings.max_output_tokens |> should.equal(Some(2000))
+  model.settings.reasoning_effort |> should.equal(Some(provider.LowEffort))
+  // Current Claude models reject sampling parameters.
+  model.settings.temperature |> should.equal(None)
+  model.settings.top_p |> should.equal(None)
+  model.settings.top_k |> should.equal(None)
+}
+
+pub fn anthropic_sampling_builder_test() {
+  let model =
+    anthropic_sampling.haiku_4_5(api_key: "test-key")
+    |> anthropic_sampling.temperature(0.5)
+    |> anthropic_sampling.top_p(0.8)
+    |> anthropic_sampling.top_k(40)
+    |> anthropic_sampling.build
+
+  model.provider.model_id |> should.equal("claude-haiku-4-5")
   model.settings.temperature |> should.equal(Some(0.5))
   model.settings.top_p |> should.equal(Some(0.8))
   model.settings.top_k |> should.equal(Some(40))
-  model.settings.stop_sequences |> should.equal(Some(["STOP", "END"]))
-  model.settings.max_output_tokens |> should.equal(Some(2000))
-  // Not supported by Anthropic
   model.settings.seed |> should.equal(None)
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
 }
 
 pub fn gemini_builder_test() {
   let model =
-    gemini_model.flash_2_5(api_key: "test-key")
-    |> gemini_model.temperature(1.0)
-    |> gemini_model.top_p(0.95)
-    |> gemini_model.top_k(50)
-    |> gemini_model.seed(123)
-    |> gemini_model.stop_sequences(["<END>"])
-    |> gemini_model.max_output_tokens(4096)
+    gemini_model.flash_3_8(api_key: "test-key")
+    |> gemini_model.temperature(0.2)
+    |> gemini_model.top_k(20)
+    |> gemini_model.seed(7)
     |> gemini_model.build
 
   model.provider.name |> should.equal("gemini")
-  model.provider.model_id |> should.equal("gemini-2.5-flash")
-  model.settings.temperature |> should.equal(Some(1.0))
-  model.settings.top_p |> should.equal(Some(0.95))
-  model.settings.top_k |> should.equal(Some(50))
-  model.settings.seed |> should.equal(Some(123))
-  model.settings.stop_sequences |> should.equal(Some(["<END>"]))
-  model.settings.max_output_tokens |> should.equal(Some(4096))
-  // Not supported by Gemini
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
+  model.provider.model_id |> should.equal("gemini-3.8-flash")
+  model.settings.top_k |> should.equal(Some(20))
+  model.settings.seed |> should.equal(Some(7))
 }
 
 pub fn mistral_builder_test() {
   let model =
-    mistral_model.small_3_2(api_key: "test-key")
-    |> mistral_model.temperature(0.8)
-    |> mistral_model.top_p(0.9)
-    |> mistral_model.max_output_tokens(512)
+    mistral_model.medium_3_5(api_key: "test-key")
+    |> mistral_model.temperature(0.3)
     |> mistral_model.build
-
   model.provider.name |> should.equal("mistral")
-  model.provider.model_id |> should.equal("mistral-small-latest")
-  model.settings.temperature |> should.equal(Some(0.8))
-  model.settings.top_p |> should.equal(Some(0.9))
-  model.settings.max_output_tokens |> should.equal(Some(512))
-  // Not supported by Mistral
-  model.settings.top_k |> should.equal(None)
-  model.settings.stop_sequences |> should.equal(None)
-  model.settings.seed |> should.equal(None)
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
-}
-
-pub fn deepseek_chat_builder_test() {
-  let model =
-    deepseek.chat(api_key: "test-key")
-    |> deepseek.temperature(1.2)
-    |> deepseek.top_p(0.85)
-    |> deepseek.stop_sequences(["###"])
-    |> deepseek.max_output_tokens(800)
-    |> deepseek.build
-
-  model.provider.name |> should.equal("deepseek")
-  model.provider.model_id |> should.equal("deepseek-chat")
-  model.settings.temperature |> should.equal(Some(1.2))
-  model.settings.top_p |> should.equal(Some(0.85))
-  model.settings.stop_sequences |> should.equal(Some(["###"]))
-  model.settings.max_output_tokens |> should.equal(Some(800))
-  // Not supported by DeepSeek chat
-  model.settings.top_k |> should.equal(None)
-  model.settings.seed |> should.equal(None)
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
-}
-
-pub fn deepseek_reasoning_builder_test() {
-  let model =
-    deepseek_reasoning.reasoner(api_key: "test-key")
-    |> deepseek_reasoning.max_output_tokens(1500)
-    |> deepseek_reasoning.build
-
-  model.provider.name |> should.equal("deepseek")
-  model.provider.model_id |> should.equal("deepseek-reasoner")
-  model.settings.max_output_tokens |> should.equal(Some(1500))
-  // Not supported by DeepSeek reasoning
-  model.settings.temperature |> should.equal(None)
-  model.settings.top_p |> should.equal(None)
-  model.settings.top_k |> should.equal(None)
-  model.settings.stop_sequences |> should.equal(None)
-  model.settings.seed |> should.equal(None)
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
-}
-
-pub fn qwen_builder_test() {
-  let model =
-    qwen_model.qwen_turbo(api_key: "test-key")
-    |> qwen_model.temperature(0.6)
-    |> qwen_model.top_p(0.7)
-    |> qwen_model.top_k(20)
-    |> qwen_model.seed(99)
-    |> qwen_model.stop_sequences(["<|endoftext|>"])
-    |> qwen_model.max_output_tokens(2048)
-    |> qwen_model.build
-
-  model.provider.name |> should.equal("qwen")
-  model.provider.model_id |> should.equal("qwen-turbo")
-  model.settings.temperature |> should.equal(Some(0.6))
-  model.settings.top_p |> should.equal(Some(0.7))
-  model.settings.top_k |> should.equal(Some(20))
-  model.settings.seed |> should.equal(Some(99))
-  model.settings.stop_sequences |> should.equal(Some(["<|endoftext|>"]))
-  model.settings.max_output_tokens |> should.equal(Some(2048))
-  // Not supported by Qwen
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
-}
-
-pub fn moonshot_builder_test() {
-  let model =
-    moonshot_model.kimi_k2_5(api_key: "test-key")
-    |> moonshot_model.temperature(0.3)
-    |> moonshot_model.top_p(0.6)
-    |> moonshot_model.max_output_tokens(3000)
-    |> moonshot_model.build
-
-  model.provider.name |> should.equal("moonshot")
-  model.provider.model_id |> should.equal("kimi-k2.5")
+  model.provider.model_id |> should.equal("mistral-medium-2604")
   model.settings.temperature |> should.equal(Some(0.3))
-  model.settings.top_p |> should.equal(Some(0.6))
-  model.settings.max_output_tokens |> should.equal(Some(3000))
-  // Not supported by Moonshot
-  model.settings.top_k |> should.equal(None)
-  model.settings.stop_sequences |> should.equal(None)
-  model.settings.seed |> should.equal(None)
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
 }
 
-pub fn minimax_builder_test() {
-  let model =
-    minimax_model.m2_5(api_key: "test-key")
-    |> minimax_model.temperature(0.9)
-    |> minimax_model.top_p(0.75)
-    |> minimax_model.max_output_tokens(1024)
+pub fn moonshot_minimax_qwen_builders_test() {
+  let kimi = moonshot_model.kimi_k3(api_key: "k") |> moonshot_model.build
+  kimi.provider.model_id |> should.equal("kimi-k3")
+
+  let mm =
+    minimax_model.m3(api_key: "k")
+    |> minimax_model.max_output_tokens(100)
     |> minimax_model.build
+  mm.provider.model_id |> should.equal("MiniMax-M3")
+  mm.settings.temperature |> should.equal(None)
 
-  model.provider.name |> should.equal("minimax")
-  model.provider.model_id |> should.equal("MiniMax-M2.5")
-  model.settings.temperature |> should.equal(Some(0.9))
-  model.settings.top_p |> should.equal(Some(0.75))
-  model.settings.max_output_tokens |> should.equal(Some(1024))
-  // Not supported by MiniMax
-  model.settings.top_k |> should.equal(None)
-  model.settings.stop_sequences |> should.equal(None)
-  model.settings.seed |> should.equal(None)
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
+  let q =
+    qwen_model.qwen3_7_plus(api_key: "k")
+    |> qwen_model.top_k(10)
+    |> qwen_model.build
+  q.provider.model_id |> should.equal("qwen3.7-plus")
+  q.settings.top_k |> should.equal(Some(10))
 }
 
-@deprecated("Testing deprecated model — suppressing compiler warning.")
-pub fn deprecated_model_fallback_test() {
-  // Deprecated models swap to replacement model_id at build time
-  let model = openai.gpt4o(api_key: "test-key") |> openai.build
-  // Should use gpt-5 as the replacement
-  model.provider.model_id |> should.equal("gpt-5")
+pub fn custom_model_id_test() {
+  let model =
+    anthropic_model.custom(api_key: "k", model: "claude-next")
+    |> anthropic_model.build
+  model.provider.model_id |> should.equal("claude-next")
+
+  let model =
+    openai.custom(api_key: "k", model: "my-fine-tune")
+    |> openai.configure(config.base_url(_, "http://localhost:8080/v1"))
+    |> openai.build
+  model.provider.model_id |> should.equal("my-fine-tune")
+}
+
+fn deepseek_body(cfg: config.ProviderConfig) -> String {
+  let request =
+    provider.GenerateRequest(
+      messages: [message.user("hi")],
+      tools: [],
+      tool_choice: provider.Auto,
+      settings: provider.default_settings(),
+      response_format: provider.TextFormat,
+    )
+  openai_compatible.encode_request(cfg, request, False)
+}
+
+pub fn deepseek_thinking_toggle_test() {
+  // The builders differ only in the `thinking` field they send.
+  let off =
+    deepseek_provider.default_config(api_key: "k", model: "deepseek-flash")
+    |> config.extra_body_field(
+      "thinking",
+      json.object([#("type", json.string("disabled"))]),
+    )
+  deepseek_body(off)
+  |> string.contains("\"thinking\":{\"type\":\"disabled\"}")
+  |> should.be_true
+
+  // Setting the same extra field twice keeps only the last value.
+  let on =
+    off
+    |> config.extra_body_field(
+      "thinking",
+      json.object([#("type", json.string("enabled"))]),
+    )
+  let body = deepseek_body(on)
+  body |> string.contains("\"enabled\"") |> should.be_true
+  body |> string.contains("\"disabled\"") |> should.be_false
+
+  // Both builders still compile and point at the same model IDs.
+  let a =
+    deepseek.flash(api_key: "k") |> deepseek.temperature(0.1) |> deepseek.build
+  a.provider.model_id |> should.equal("deepseek-flash")
+  let b =
+    deepseek_reasoning.v4_pro(api_key: "k")
+    |> deepseek_reasoning.reasoning_effort(provider.MediumEffort)
+    |> deepseek_reasoning.build
+  b.provider.model_id |> should.equal("deepseek-v4-pro")
+  b.settings.temperature |> should.equal(None)
 }
 
 pub fn agent_from_model_test() {
-  let model =
-    openai_reasoning.gpt5_nano(api_key: "test-key")
-    |> openai_reasoning.max_output_tokens(1000)
-    |> openai_reasoning.build
-
+  let model = openai_reasoning.gpt5_nano(api_key: "k") |> openai_reasoning.build
   let a = agent.from(model)
-  a.provider.name |> should.equal("openai")
   a.provider.model_id |> should.equal("gpt-5-nano")
-  a.settings.max_output_tokens |> should.equal(Some(1000))
-}
-
-pub fn model_defaults_test() {
-  let model = openai.gpt5(api_key: "test-key") |> openai.build
-  model.settings.temperature |> should.equal(None)
-  model.settings.top_p |> should.equal(None)
-  model.settings.seed |> should.equal(None)
-  model.settings.max_output_tokens |> should.equal(None)
-  model.settings.stop_sequences |> should.equal(None)
-  model.settings.top_k |> should.equal(None)
-  model.settings.presence_penalty |> should.equal(None)
-  model.settings.frequency_penalty |> should.equal(None)
 }

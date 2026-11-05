@@ -11,7 +11,7 @@ import integration/integration_helpers.{
 
 const env_var = "MINIMAX_API_KEY"
 
-const model = "MiniMax-M1"
+const model = "MiniMax-M3.1-Flash"
 
 pub fn minimax_text_generation_test() {
   case get_api_key(env_var) {

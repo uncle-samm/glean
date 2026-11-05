@@ -1,19 +1,24 @@
-/// Anthropic provider (Claude models).
-/// Uses the Anthropic Messages API format (different from OpenAI).
+//// Anthropic provider (Claude models), using the Messages API.
+////
+//// Thinking blocks (including redacted ones) are decoded with their
+//// signatures and sent back unchanged on the next turn, which Claude
+//// requires when thinking and tool use are combined.
+
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/string_tree
+import gleam/string_tree.{type StringTree}
 import glean/error.{type FinishReason, type GleanError}
 import glean/json_value
 import glean/message.{type Message}
 import glean/provider.{
   type GenerateRequest, type GenerateResult, type GeneratedContent,
-  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type Provider, GenerateResult, GeneratedReasoning, GeneratedRedactedReasoning,
+  GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
@@ -26,16 +31,29 @@ const base_url = "https://api.anthropic.com/v1"
 
 const anthropic_version = "2023-06-01"
 
+/// Used when the caller doesn't set `max_output_tokens`
+/// (the Messages API requires `max_tokens`).
+const default_max_tokens = 8192
+
+/// The default configuration for this provider. Change it with the
+/// `glean/providers/config` setters, then pass it to `from_config`.
+pub fn default_config(
+  api_key api_key: String,
+  model model: String,
+) -> ProviderConfig {
+  config.new(api_key: api_key, model: model)
+  |> config.base_url(base_url)
+}
+
 /// Create an Anthropic provider.
 ///
 /// ## Example
 ///
 /// ```gleam
-/// let provider = anthropic.new(api_key: "sk-ant-...", model: "claude-sonnet-4-20250514")
+/// let provider = anthropic.new(api_key: "sk-ant-...", model: "claude-sonnet-5-5")
 /// ```
 pub fn new(api_key api_key: String, model model: String) -> Provider {
-  config.new(api_key: api_key, model: model)
-  |> config.base_url(base_url)
+  default_config(api_key: api_key, model: model)
   |> from_config
 }
 
@@ -59,29 +77,45 @@ fn do_generate(
   config: ProviderConfig,
   gen_request: GenerateRequest,
 ) -> Result(GenerateResult, GleanError) {
-  let body = encode_request(config.model, gen_request)
-  let url = config.base_url <> "/messages"
+  use body <- result.try(encode_request(config.model, gen_request, False))
+  use response_body <- result.try(http_utils.send_post(
+    config,
+    "anthropic",
+    config.base_url <> "/messages",
+    body,
+    auth_headers(config),
+  ))
+  decode_response(config.model, response_body)
+}
 
-  case make_http_request(config, url, body) {
-    Error(err) -> Error(err)
-    Ok(response_body) -> decode_response(config.model, response_body)
-  }
+fn auth_headers(config: ProviderConfig) -> List(#(String, String)) {
+  [
+    #("x-api-key", config.api_key),
+    #("anthropic-version", anthropic_version),
+  ]
+}
+
+// --- Streaming generation ---
+
+/// One content block being assembled from stream events.
+type Block {
+  TextBlock(text: StringTree)
+  ThinkingBlock(text: StringTree, signature: StringTree)
+  RedactedThinkingBlock(data: String)
+  ToolUseBlock(id: String, name: String, args: StringTree)
+  /// A block type glean doesn't use (e.g. server tool results).
+  IgnoredBlock
 }
 
 /// Streaming accumulator — threaded through a pure receive loop.
+/// Blocks are kept newest first (keyed by block index) and reversed once at
+/// the end, so the result keeps the order Claude produced them in.
 type StreamAccumulator {
   StreamAccumulator(
-    text: string_tree.StringTree,
-    tool_calls: List(StreamingToolCall),
+    blocks: List(#(Int, Block)),
     finish_reason: FinishReason,
     usage: Usage,
-    current_block_index: Int,
-    current_block_type: String,
   )
-}
-
-type StreamingToolCall {
-  StreamingToolCall(id: String, name: String, args: string_tree.StringTree)
 }
 
 fn do_stream(
@@ -89,16 +123,21 @@ fn do_stream(
   gen_request: GenerateRequest,
   on_event: fn(StreamEvent) -> Nil,
 ) -> Result(GenerateResult, GleanError) {
-  let body = encode_stream_request(config.model, gen_request)
-  let url = config.base_url <> "/messages"
+  use body <- result.try(encode_request(config.model, gen_request, True))
+  let headers =
+    list.append(
+      auth_headers(config),
+      list.map(config.headers, fn(h) { #(h.0, h.1) }),
+    )
 
-  let headers = [
-    #("x-api-key", config.api_key),
-    #("anthropic-version", anthropic_version),
-    ..list.map(config.headers, fn(h) { #(h.0, h.1) })
-  ]
-
-  case sse.start_stream(url, headers, body, config.timeout_ms) {
+  case
+    sse.start_stream(
+      config.base_url <> "/messages",
+      headers,
+      body,
+      config.timeout_ms,
+    )
+  {
     Error(msg) ->
       Error(error.ProviderError(
         provider: "anthropic",
@@ -109,14 +148,10 @@ fn do_stream(
     Ok(#(event_subject, manager_subject)) -> {
       let acc =
         StreamAccumulator(
-          text: string_tree.new(),
-          tool_calls: [],
+          blocks: [],
           finish_reason: error.Stop,
           usage: stream.zero_usage(),
-          current_block_index: 0,
-          current_block_type: "",
         )
-
       use final_acc <- result.try(anthropic_stream_loop(
         event_subject,
         manager_subject,
@@ -125,23 +160,8 @@ fn do_stream(
         config.model,
         config.timeout_ms,
       ))
-
-      let text_content = case string_tree.to_string(final_acc.text) {
-        "" -> []
-        t -> [GeneratedText(text: t)]
-      }
-
-      let tool_content =
-        list.map(final_acc.tool_calls, fn(tc) {
-          GeneratedToolCall(
-            tool_call_id: tc.id,
-            tool_name: tc.name,
-            arguments_json: string_tree.to_string(tc.args),
-          )
-        })
-
       Ok(GenerateResult(
-        content: list.append(text_content, tool_content),
+        content: blocks_to_content(list.reverse(final_acc.blocks)),
         finish_reason: final_acc.finish_reason,
         usage: final_acc.usage,
         model_id: config.model,
@@ -150,80 +170,36 @@ fn do_stream(
   }
 }
 
-fn encode_stream_request(
-  model: String,
-  gen_request: GenerateRequest,
-) -> String {
-  let #(system_parts, conversation_messages) =
-    split_system_messages(gen_request.messages)
-  let anthropic_messages = encode_messages(conversation_messages)
-
-  let fields = [
-    #("model", json.string(model)),
-    #("messages", json.preprocessed_array(anthropic_messages)),
-    #("stream", json.bool(True)),
-  ]
-
-  let fields = case system_parts {
-    [] -> fields
-    _ ->
-      list.append(fields, [
-        #(
-          "system",
-          json.preprocessed_array(
-            list.map(system_parts, fn(s) {
-              json.object([
-                #("type", json.string("text")),
-                #("text", json.string(s)),
-              ])
-            }),
+fn blocks_to_content(blocks: List(#(Int, Block))) -> List(GeneratedContent) {
+  list.filter_map(blocks, fn(entry) {
+    case entry.1 {
+      TextBlock(text) -> Ok(GeneratedText(text: string_tree.to_string(text)))
+      ThinkingBlock(text, signature) ->
+        Ok(
+          GeneratedReasoning(
+            text: string_tree.to_string(text),
+            signature: case string_tree.to_string(signature) {
+              "" -> None
+              sig -> Some(sig)
+            },
           ),
-        ),
-      ])
-  }
-
-  let max_tokens = case gen_request.settings.max_output_tokens {
-    Some(max) -> max
-    None -> 4096
-  }
-  let fields = list.append(fields, [#("max_tokens", json.int(max_tokens))])
-
-  let fields = case gen_request.tool_choice {
-    provider.NoTools -> fields
-    choice ->
-      case gen_request.tools {
-        [] -> fields
-        tools ->
-          list.append(fields, [
-            #("tools", json.preprocessed_array(encode_tools(tools))),
-            #("tool_choice", encode_tool_choice(choice)),
-          ])
-      }
-  }
-
-  let fields = case gen_request.settings.temperature {
-    None -> fields
-    Some(temp) -> list.append(fields, [#("temperature", json.float(temp))])
-  }
-
-  let fields = case gen_request.settings.top_p {
-    None -> fields
-    Some(p) -> list.append(fields, [#("top_p", json.float(p))])
-  }
-
-  let fields = case gen_request.settings.top_k {
-    None -> fields
-    Some(k) -> list.append(fields, [#("top_k", json.int(k))])
-  }
-
-  let fields = case gen_request.settings.stop_sequences {
-    None -> fields
-    Some(stops) ->
-      list.append(fields, [#("stop_sequences", json.array(stops, json.string))])
-  }
-
-  json.object(fields)
-  |> json.to_string
+        )
+      RedactedThinkingBlock(data) -> Ok(GeneratedRedactedReasoning(data: data))
+      ToolUseBlock(id, name, args) ->
+        Ok(
+          GeneratedToolCall(
+            tool_call_id: id,
+            tool_name: name,
+            arguments_json: case string_tree.to_string(args) {
+              // A tool with no arguments streams no input at all.
+              "" -> "{}"
+              json -> json
+            },
+          ),
+        )
+      IgnoredBlock -> Error(Nil)
+    }
+  })
 }
 
 /// Receive SSE events until `message_stop`.
@@ -261,9 +237,9 @@ fn anthropic_stream_loop(
         message: data,
       ))
     }
-    Ok(httpp_sse.Event(Some("message_stop"), _event_id, data)) -> {
+    Ok(httpp_sse.Event(Some("message_stop"), _event_id, _data)) -> {
       process.send(manager, httpp_sse.Shutdown)
-      Ok(process_anthropic_event(acc, Some("message_stop"), data, on_event))
+      Ok(acc)
     }
     Ok(httpp_sse.Event(event_type, _event_id, data)) ->
       anthropic_stream_loop(
@@ -277,24 +253,35 @@ fn anthropic_stream_loop(
   }
 }
 
+fn block_id(index: Int) -> String {
+  "block_" <> int.to_string(index)
+}
+
+type Delta {
+  Delta(
+    delta_type: String,
+    text: String,
+    thinking: String,
+    signature: String,
+    partial_json: String,
+  )
+}
+
 fn process_anthropic_event(
   acc: StreamAccumulator,
-  event_type: option.Option(String),
+  event_type: Option(String),
   data: String,
   on_event: fn(StreamEvent) -> Nil,
 ) -> StreamAccumulator {
   case event_type {
     Some("message_start") -> {
       let usage_decoder = {
-        use msg <- decode.field("message", {
-          use usage <- decode.field("usage", {
-            use input <- decode.field("input_tokens", decode.int)
-            use output <- decode.optional_field("output_tokens", 0, decode.int)
-            decode.success(Usage(input_tokens: input, output_tokens: output))
-          })
-          decode.success(usage)
+        use usage <- decode.subfield(["message", "usage"], {
+          use input <- decode.field("input_tokens", decode.int)
+          use output <- decode.optional_field("output_tokens", 0, decode.int)
+          decode.success(Usage(input_tokens: input, output_tokens: output))
         })
-        decode.success(msg)
+        decode.success(usage)
       }
       case json.parse(data, usage_decoder) {
         Ok(usage) -> StreamAccumulator(..acc, usage: usage)
@@ -309,40 +296,36 @@ fn process_anthropic_event(
           use block_type <- decode.field("type", decode.string)
           use id <- decode.optional_field("id", "", decode.string)
           use name <- decode.optional_field("name", "", decode.string)
-          decode.success(#(block_type, id, name))
+          use data <- decode.optional_field("data", "", decode.string)
+          decode.success(#(block_type, id, name, data))
         })
         decode.success(#(index, block))
       }
       case json.parse(data, block_decoder) {
-        Ok(#(index, #(block_type, id, name))) -> {
-          case block_type {
+        Error(_) -> acc
+        Ok(#(index, #(block_type, id, name, data))) -> {
+          let block = case block_type {
             "text" -> {
-              on_event(stream.TextStart(id: "block_" <> int.to_string(index)))
-              StreamAccumulator(
-                ..acc,
-                current_block_index: index,
-                current_block_type: "text",
-              )
+              on_event(stream.TextStart(id: block_id(index)))
+              TextBlock(string_tree.new())
             }
+            "thinking" -> {
+              on_event(stream.ReasoningStart(id: block_id(index)))
+              ThinkingBlock(string_tree.new(), string_tree.new())
+            }
+            "redacted_thinking" -> RedactedThinkingBlock(data)
             "tool_use" -> {
               on_event(stream.ToolCallStart(
-                id: "block_" <> int.to_string(index),
+                id: block_id(index),
                 tool_call_id: id,
                 tool_name: name,
               ))
-              let new_tc =
-                StreamingToolCall(id: id, name: name, args: string_tree.new())
-              StreamAccumulator(
-                ..acc,
-                current_block_index: index,
-                current_block_type: "tool_use",
-                tool_calls: list.append(acc.tool_calls, [new_tc]),
-              )
+              ToolUseBlock(id, name, string_tree.new())
             }
-            _ -> acc
+            _ -> IgnoredBlock
           }
+          StreamAccumulator(..acc, blocks: [#(index, block), ..acc.blocks])
         }
-        Error(_) -> acc
       }
     }
 
@@ -352,206 +335,260 @@ fn process_anthropic_event(
         use delta <- decode.field("delta", {
           use delta_type <- decode.field("type", decode.string)
           use text <- decode.optional_field("text", "", decode.string)
+          use thinking <- decode.optional_field("thinking", "", decode.string)
+          use signature <- decode.optional_field("signature", "", decode.string)
           use partial_json <- decode.optional_field(
             "partial_json",
             "",
             decode.string,
           )
-          decode.success(#(delta_type, text, partial_json))
+          decode.success(Delta(
+            delta_type:,
+            text:,
+            thinking:,
+            signature:,
+            partial_json:,
+          ))
         })
         decode.success(#(index, delta))
       }
       case json.parse(data, delta_decoder) {
-        Ok(#(index, #(delta_type, text, partial_json))) -> {
-          case delta_type {
-            "text_delta" -> {
-              on_event(stream.TextDelta(
-                id: "block_" <> int.to_string(index),
-                delta: text,
-              ))
-              StreamAccumulator(..acc, text: string_tree.append(acc.text, text))
-            }
-            "input_json_delta" -> {
-              let tc_id = case list.last(acc.tool_calls) {
-                Ok(tc) -> tc.id
-                Error(_) -> ""
-              }
-              on_event(stream.ToolCallDelta(
-                id: "block_" <> int.to_string(index),
-                tool_call_id: tc_id,
-                delta: partial_json,
-              ))
-              StreamAccumulator(
-                ..acc,
-                tool_calls: update_last_tool_call(acc.tool_calls, partial_json),
-              )
-            }
-            _ -> acc
-          }
-        }
         Error(_) -> acc
+        Ok(#(index, delta)) ->
+          StreamAccumulator(
+            ..acc,
+            blocks: update_block(acc.blocks, index, fn(block) {
+              apply_delta(block, index, delta, on_event)
+            }),
+          )
       }
     }
 
     Some("content_block_stop") -> {
-      let block_id = "block_" <> int.to_string(acc.current_block_index)
-      case acc.current_block_type {
-        "text" -> on_event(stream.TextEnd(id: block_id))
-        "tool_use" -> {
-          let tc_id = case list.last(acc.tool_calls) {
-            Ok(tc) -> tc.id
-            Error(_) -> ""
+      case json.parse(data, decode.field("index", decode.int, decode.success)) {
+        Error(_) -> Nil
+        Ok(index) ->
+          case list.key_find(acc.blocks, index) {
+            Ok(TextBlock(_)) -> on_event(stream.TextEnd(id: block_id(index)))
+            Ok(ThinkingBlock(..)) ->
+              on_event(stream.ReasoningEnd(id: block_id(index)))
+            Ok(ToolUseBlock(id: id, ..)) ->
+              on_event(stream.ToolCallEnd(id: block_id(index), tool_call_id: id))
+            _ -> Nil
           }
-          on_event(stream.ToolCallEnd(id: block_id, tool_call_id: tc_id))
-        }
-        _ -> Nil
       }
       acc
     }
 
     Some("message_delta") -> {
       let msg_delta_decoder = {
-        use stop_reason <- decode.optional_field("delta", "", {
-          use sr <- decode.optional_field("stop_reason", "", decode.string)
+        use stop_reason <- decode.optional_field("delta", None, {
+          use sr <- decode.optional_field(
+            "stop_reason",
+            None,
+            decode.optional(decode.string),
+          )
           decode.success(sr)
         })
-        use usage <- decode.optional_field("usage", Usage(0, 0), {
+        use output <- decode.optional_field("usage", None, {
           use output <- decode.field("output_tokens", decode.int)
-          decode.success(Usage(
-            input_tokens: acc.usage.input_tokens,
-            output_tokens: output,
-          ))
+          decode.success(Some(output))
         })
-        decode.success(#(stop_reason, usage))
+        decode.success(#(stop_reason, output))
       }
       case json.parse(data, msg_delta_decoder) {
-        Ok(#(stop_reason, usage)) -> {
-          let finish = case stop_reason {
-            "" -> acc.finish_reason
-            sr -> parse_stop_reason(sr)
-          }
-          let final_usage = case usage {
-            Usage(0, 0) -> acc.usage
-            u -> u
-          }
-          StreamAccumulator(..acc, finish_reason: finish, usage: final_usage)
-        }
         Error(_) -> acc
+        Ok(#(stop_reason, output)) ->
+          StreamAccumulator(
+            ..acc,
+            finish_reason: case stop_reason {
+              Some(sr) -> parse_stop_reason(sr)
+              None -> acc.finish_reason
+            },
+            usage: case output {
+              Some(n) -> Usage(..acc.usage, output_tokens: n)
+              None -> acc.usage
+            },
+          )
       }
     }
 
-    // message_stop, ping, error, etc
+    // ping and unknown events
     _ -> acc
   }
 }
 
-fn update_last_tool_call(
-  tool_calls: List(StreamingToolCall),
-  args_delta: String,
-) -> List(StreamingToolCall) {
-  case list.reverse(tool_calls) {
-    [] -> []
-    [last, ..rest] -> {
-      let updated =
-        StreamingToolCall(
-          ..last,
-          args: string_tree.append(last.args, args_delta),
-        )
-      list.reverse([updated, ..rest])
+fn apply_delta(
+  block: Block,
+  index: Int,
+  delta: Delta,
+  on_event: fn(StreamEvent) -> Nil,
+) -> Block {
+  case delta.delta_type, block {
+    "text_delta", TextBlock(tree) -> {
+      on_event(stream.TextDelta(id: block_id(index), delta: delta.text))
+      TextBlock(string_tree.append(tree, delta.text))
     }
+    "thinking_delta", ThinkingBlock(tree, sig) -> {
+      on_event(stream.ReasoningDelta(id: block_id(index), delta: delta.thinking))
+      ThinkingBlock(string_tree.append(tree, delta.thinking), sig)
+    }
+    "signature_delta", ThinkingBlock(tree, sig) ->
+      ThinkingBlock(tree, string_tree.append(sig, delta.signature))
+    "input_json_delta", ToolUseBlock(id, name, args) -> {
+      on_event(stream.ToolCallDelta(
+        id: block_id(index),
+        tool_call_id: id,
+        delta: delta.partial_json,
+      ))
+      ToolUseBlock(id, name, string_tree.append(args, delta.partial_json))
+    }
+    _, other -> other
   }
 }
 
-// --- HTTP ---
-
-fn make_http_request(
-  config: ProviderConfig,
-  url: String,
-  body: String,
-) -> Result(String, GleanError) {
-  http_utils.send_post(config, "anthropic", url, body, [
-    #("x-api-key", config.api_key),
-    #("anthropic-version", anthropic_version),
-  ])
+fn update_block(
+  blocks: List(#(Int, Block)),
+  index: Int,
+  f: fn(Block) -> Block,
+) -> List(#(Int, Block)) {
+  list.map(blocks, fn(entry) {
+    case entry.0 == index {
+      True -> #(index, f(entry.1))
+      False -> entry
+    }
+  })
 }
 
 // --- Request encoding (Anthropic format) ---
 
-fn encode_request(model: String, gen_request: GenerateRequest) -> String {
+/// Encode a Messages API request body. Public for tests.
+pub fn encode_request(
+  model: String,
+  gen_request: GenerateRequest,
+  stream: Bool,
+) -> Result(String, GleanError) {
+  use output_config <- result.try(encode_output_config(
+    gen_request.response_format,
+    gen_request.settings.reasoning_effort,
+  ))
   let #(system_parts, conversation_messages) =
     split_system_messages(gen_request.messages)
 
-  let anthropic_messages = encode_messages(conversation_messages)
-
+  // Fields are collected newest first and reversed once at the end.
   let fields = [
+    #(
+      "max_tokens",
+      json.int(option.unwrap(
+        gen_request.settings.max_output_tokens,
+        default_max_tokens,
+      )),
+    ),
+    #(
+      "messages",
+      json.preprocessed_array(list.flat_map(
+        conversation_messages,
+        encode_message,
+      )),
+    ),
     #("model", json.string(model)),
-    #("messages", json.preprocessed_array(anthropic_messages)),
   ]
 
-  // System prompt
   let fields = case system_parts {
     [] -> fields
-    _ ->
-      list.append(fields, [
+    _ -> [
+      #(
+        "system",
+        json.preprocessed_array(
+          list.map(system_parts, fn(s) {
+            json.object([
+              #("type", json.string("text")),
+              #("text", json.string(s)),
+            ])
+          }),
+        ),
+      ),
+      ..fields
+    ]
+  }
+
+  let fields = case gen_request.tools {
+    [] -> fields
+    tools -> [
+      #("tool_choice", encode_tool_choice(gen_request.tool_choice)),
+      #("tools", json.preprocessed_array(list.map(tools, encode_tool))),
+      ..fields
+    ]
+  }
+
+  let settings = gen_request.settings
+  let fields =
+    fields
+    |> add_optional("temperature", settings.temperature, json.float)
+    |> add_optional("top_p", settings.top_p, json.float)
+    |> add_optional("top_k", settings.top_k, json.int)
+    |> add_optional("stop_sequences", settings.stop_sequences, fn(stops) {
+      json.array(stops, json.string)
+    })
+    |> add_optional("output_config", output_config, fn(c) { c })
+
+  let fields = case stream {
+    True -> [#("stream", json.bool(True)), ..fields]
+    False -> fields
+  }
+
+  Ok(json.to_string(json.object(list.reverse(fields))))
+}
+
+/// Build `output_config`: structured output (`format`) and `effort`.
+///
+/// Claude's structured outputs need a schema, so `JsonFormat(schema: None)`
+/// is a configuration error rather than a request that would quietly return
+/// free text.
+fn encode_output_config(
+  format: provider.ResponseFormat,
+  effort: Option(provider.ReasoningEffort),
+) -> Result(Option(json.Json), GleanError) {
+  use format_field <- result.try(case format {
+    provider.TextFormat -> Ok([])
+    provider.JsonFormat(schema: Some(s), ..) ->
+      Ok([
         #(
-          "system",
-          json.preprocessed_array(
-            list.map(system_parts, fn(s) {
-              json.object([
-                #("type", json.string("text")),
-                #("text", json.string(s)),
-              ])
-            }),
-          ),
+          "format",
+          json.object([
+            #("type", json.string("json_schema")),
+            #("schema", schema.to_json_strict(s)),
+          ]),
         ),
       ])
+    provider.JsonFormat(schema: None, ..) ->
+      Error(error.ConfigError(
+        message: "Claude's JSON output needs a schema. "
+        <> "Pass one with agent.json_output(schema: Some(...)).",
+      ))
+  })
+  let effort_field = case effort {
+    None -> []
+    Some(e) -> [
+      #("effort", json.string(provider.reasoning_effort_to_string(e))),
+    ]
   }
-
-  // Max tokens (required by Anthropic)
-  let max_tokens = case gen_request.settings.max_output_tokens {
-    Some(max) -> max
-    None -> 4096
+  case list.append(format_field, effort_field) {
+    [] -> Ok(None)
+    fields -> Ok(Some(json.object(fields)))
   }
-  let fields = list.append(fields, [#("max_tokens", json.int(max_tokens))])
+}
 
-  // Tools — when NoTools, don't include tools in the request at all
-  let fields = case gen_request.tool_choice {
-    provider.NoTools -> fields
-    choice ->
-      case gen_request.tools {
-        [] -> fields
-        tools ->
-          list.append(fields, [
-            #("tools", json.preprocessed_array(encode_tools(tools))),
-            #("tool_choice", encode_tool_choice(choice)),
-          ])
-      }
-  }
-
-  // Optional settings
-  let fields = case gen_request.settings.temperature {
+fn add_optional(
+  fields: List(#(String, json.Json)),
+  name: String,
+  value: Option(a),
+  encode: fn(a) -> json.Json,
+) -> List(#(String, json.Json)) {
+  case value {
     None -> fields
-    Some(temp) -> list.append(fields, [#("temperature", json.float(temp))])
+    Some(v) -> [#(name, encode(v)), ..fields]
   }
-
-  let fields = case gen_request.settings.top_p {
-    None -> fields
-    Some(p) -> list.append(fields, [#("top_p", json.float(p))])
-  }
-
-  let fields = case gen_request.settings.top_k {
-    None -> fields
-    Some(k) -> list.append(fields, [#("top_k", json.int(k))])
-  }
-
-  let fields = case gen_request.settings.stop_sequences {
-    None -> fields
-    Some(stops) ->
-      list.append(fields, [#("stop_sequences", json.array(stops, json.string))])
-  }
-
-  json.object(fields)
-  |> json.to_string
 }
 
 fn split_system_messages(
@@ -564,7 +601,6 @@ fn split_system_messages(
         _ -> Error(Nil)
       }
     })
-
   let non_system =
     list.filter(messages, fn(m) {
       case m {
@@ -572,12 +608,7 @@ fn split_system_messages(
         _ -> True
       }
     })
-
   #(system, non_system)
-}
-
-fn encode_messages(messages: List(Message)) -> List(json.Json) {
-  list.flat_map(messages, encode_message)
 }
 
 fn encode_message(msg: Message) -> List(json.Json) {
@@ -597,7 +628,10 @@ fn encode_message(msg: Message) -> List(json.Json) {
         #("role", json.string("assistant")),
         #(
           "content",
-          json.preprocessed_array(list.map(content, encode_assistant_content)),
+          json.preprocessed_array(list.filter_map(
+            content,
+            encode_assistant_content,
+          )),
         ),
       ]),
     ]
@@ -620,58 +654,73 @@ fn encode_user_content(content: message.UserContent) -> json.Json {
         #("type", json.string("text")),
         #("text", json.string(text)),
       ])
-    message.UserFile(data, media_type) ->
-      case data {
+    message.UserFile(data, media_type) -> {
+      let block_type = case media_type {
+        "application/pdf" -> "document"
+        _ -> "image"
+      }
+      let source = case data {
         message.Base64Data(b64) ->
           json.object([
-            #("type", json.string("image")),
-            #(
-              "source",
-              json.object([
-                #("type", json.string("base64")),
-                #("media_type", json.string(media_type)),
-                #("data", json.string(b64)),
-              ]),
-            ),
+            #("type", json.string("base64")),
+            #("media_type", json.string(media_type)),
+            #("data", json.string(b64)),
           ])
         message.UrlData(url) ->
           json.object([
-            #("type", json.string("image")),
-            #(
-              "source",
-              json.object([
-                #("type", json.string("url")),
-                #("url", json.string(url)),
-              ]),
-            ),
+            #("type", json.string("url")),
+            #("url", json.string(url)),
           ])
       }
+      json.object([
+        #("type", json.string(block_type)),
+        #("source", source),
+      ])
+    }
   }
 }
 
-fn encode_assistant_content(content: message.AssistantContent) -> json.Json {
+/// Thinking without a signature (e.g. reasoning that came from another
+/// provider) can't be replayed to Claude, so it is left out. So is empty
+/// text, which the Messages API rejects.
+fn encode_assistant_content(
+  content: message.AssistantContent,
+) -> Result(json.Json, Nil) {
   case content {
+    message.AssistantText("") -> Error(Nil)
     message.AssistantText(text) ->
-      json.object([
-        #("type", json.string("text")),
-        #("text", json.string(text)),
-      ])
-    message.AssistantReasoning(text) ->
-      json.object([
-        #("type", json.string("thinking")),
-        #("thinking", json.string(text)),
-      ])
-    message.AssistantToolCall(id, name, args_json) -> {
+      Ok(
+        json.object([
+          #("type", json.string("text")),
+          #("text", json.string(text)),
+        ]),
+      )
+    message.AssistantReasoning(text, Some(signature)) ->
+      Ok(
+        json.object([
+          #("type", json.string("thinking")),
+          #("thinking", json.string(text)),
+          #("signature", json.string(signature)),
+        ]),
+      )
+    message.AssistantReasoning(_, None) -> Error(Nil)
+    message.AssistantRedactedReasoning(data) ->
+      Ok(
+        json.object([
+          #("type", json.string("redacted_thinking")),
+          #("data", json.string(data)),
+        ]),
+      )
+    message.AssistantToolCall(id, name, args_json) ->
       // Anthropic expects input as an object, not a string
-      // Parse the JSON string back to a JSON value for embedding
-      let input_json = json_value.parse_to_json(args_json)
-      json.object([
-        #("type", json.string("tool_use")),
-        #("id", json.string(id)),
-        #("name", json.string(name)),
-        #("input", input_json),
-      ])
-    }
+      Ok(
+        json.object([
+          #("type", json.string("tool_use")),
+          #("id", json.string(id)),
+          #("name", json.string(name)),
+          #("input", json_value.arguments_to_object(args_json)),
+        ]),
+      )
   }
 }
 
@@ -687,26 +736,24 @@ fn encode_tool_result(result: message.ToolResult) -> json.Json {
       json.object([
         #("type", json.string("tool_result")),
         #("tool_use_id", json.string(tool_call_id)),
-        #("content", json.string("Error: " <> error_message)),
+        #("content", json.string(error_message)),
         #("is_error", json.bool(True)),
       ])
   }
 }
 
-fn encode_tools(tools: List(provider.ToolSpec)) -> List(json.Json) {
-  list.map(tools, fn(t) {
-    json.object([
-      #("name", json.string(t.name)),
-      #("description", json.string(t.description)),
-      #("input_schema", schema.to_json(t.input_schema)),
-    ])
-  })
+fn encode_tool(t: provider.ToolSpec) -> json.Json {
+  json.object([
+    #("name", json.string(t.name)),
+    #("description", json.string(t.description)),
+    #("input_schema", schema.to_json(t.input_schema)),
+  ])
 }
 
 fn encode_tool_choice(choice: provider.ToolChoice) -> json.Json {
   case choice {
-    provider.Auto | provider.NoTools ->
-      json.object([#("type", json.string("auto"))])
+    provider.Auto -> json.object([#("type", json.string("auto"))])
+    provider.NoTools -> json.object([#("type", json.string("none"))])
     provider.Required -> json.object([#("type", json.string("any"))])
     provider.SpecificTool(name) ->
       json.object([
@@ -718,36 +765,30 @@ fn encode_tool_choice(choice: provider.ToolChoice) -> json.Json {
 
 // --- Response decoding (Anthropic format) ---
 
-fn decode_response(
+/// Decode a non-streaming Messages API response body. Public for tests.
+pub fn decode_response(
   model_id: String,
   body: String,
 ) -> Result(GenerateResult, GleanError) {
-  let decoder = anthropic_response_decoder()
-  case json.parse(body, decoder) {
+  case json.parse(body, anthropic_response_decoder()) {
     Error(_) ->
       Error(error.JsonParseError(
         input: body,
         message: "Failed to decode Anthropic response",
       ))
-    Ok(parsed) ->
+    Ok(#(content, finish_reason, usage)) ->
       Ok(GenerateResult(
-        content: parsed.content,
-        finish_reason: parsed.finish_reason,
-        usage: parsed.usage,
+        content: content,
+        finish_reason: finish_reason,
+        usage: usage,
         model_id: model_id,
       ))
   }
 }
 
-type ParsedResponse {
-  ParsedResponse(
-    content: List(GeneratedContent),
-    finish_reason: FinishReason,
-    usage: Usage,
-  )
-}
-
-fn anthropic_response_decoder() -> decode.Decoder(ParsedResponse) {
+fn anthropic_response_decoder() -> decode.Decoder(
+  #(List(GeneratedContent), FinishReason, Usage),
+) {
   let usage_decoder = {
     use input_tokens <- decode.field("input_tokens", decode.int)
     use output_tokens <- decode.field("output_tokens", decode.int)
@@ -757,48 +798,59 @@ fn anthropic_response_decoder() -> decode.Decoder(ParsedResponse) {
     ))
   }
 
-  // Anthropic content blocks can be "text" or "tool_use"
-  let content_block_decoder =
-    decode.one_of(text_block_decoder(), [tool_use_block_decoder()])
-
-  use content <- decode.field("content", decode.list(content_block_decoder))
-  use stop_reason <- decode.field("stop_reason", decode.string)
+  use blocks <- decode.field("content", decode.list(content_block_decoder()))
+  use stop_reason <- decode.optional_field(
+    "stop_reason",
+    None,
+    decode.optional(decode.string),
+  )
   use usage <- decode.field("usage", usage_decoder)
 
-  decode.success(ParsedResponse(
-    content: content,
-    finish_reason: parse_stop_reason(stop_reason),
-    usage: usage,
+  decode.success(#(
+    option.values(blocks),
+    case stop_reason {
+      Some(reason) -> parse_stop_reason(reason)
+      None -> error.Stop
+    },
+    usage,
   ))
 }
 
-fn text_block_decoder() -> decode.Decoder(GeneratedContent) {
+/// Decodes one content block. Block types glean doesn't use decode to None
+/// instead of failing the whole response.
+fn content_block_decoder() -> decode.Decoder(Option(GeneratedContent)) {
   use block_type <- decode.field("type", decode.string)
   case block_type {
     "text" -> {
       use text <- decode.field("text", decode.string)
-      decode.success(GeneratedText(text: text))
+      decode.success(Some(GeneratedText(text: text)))
     }
-    _ -> decode.failure(GeneratedText(text: ""), "text block")
-  }
-}
-
-fn tool_use_block_decoder() -> decode.Decoder(GeneratedContent) {
-  use block_type <- decode.field("type", decode.string)
-  case block_type {
+    "thinking" -> {
+      use text <- decode.field("thinking", decode.string)
+      use signature <- decode.optional_field(
+        "signature",
+        None,
+        decode.optional(decode.string),
+      )
+      decode.success(Some(GeneratedReasoning(text: text, signature: signature)))
+    }
+    "redacted_thinking" -> {
+      use data <- decode.field("data", decode.string)
+      decode.success(Some(GeneratedRedactedReasoning(data: data)))
+    }
     "tool_use" -> {
       use id <- decode.field("id", decode.string)
       use name <- decode.field("name", decode.string)
-      // input is a JSON object — we encode it back to a string
-      use input <- decode.field("input", decode.dynamic)
-      let args_json = json_value.dynamic_to_string(input)
-      decode.success(GeneratedToolCall(
-        tool_call_id: id,
-        tool_name: name,
-        arguments_json: args_json,
-      ))
+      use input <- decode.field("input", json_value.decoder())
+      decode.success(
+        Some(GeneratedToolCall(
+          tool_call_id: id,
+          tool_name: name,
+          arguments_json: json_value.to_string(input),
+        )),
+      )
     }
-    _ -> decode.failure(GeneratedToolCall("", "", ""), "tool_use block")
+    _ -> decode.success(None)
   }
 }
 
@@ -808,6 +860,7 @@ fn parse_stop_reason(reason: String) -> FinishReason {
     "tool_use" -> error.ToolCalls
     "max_tokens" -> error.Length
     "stop_sequence" -> error.Stop
+    "refusal" -> error.ContentFilter
     other -> error.Other(other)
   }
 }
