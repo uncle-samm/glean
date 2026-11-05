@@ -12,11 +12,11 @@ A Gleam framework for building AI agents. Think [Vercel AI SDK](https://github.c
 - **Tool calling** — typed tools with dependency injection, JSON Schema definitions, arguments validated before your tool runs, parallel execution, retries, and error recovery
 - **Structured output** — ask for JSON matching a schema; glean validates the answer
 - **Reasoning** — thinking/reasoning content from Claude, Gemini, DeepSeek, Kimi and Qwen is streamed and sent back on later turns as each API requires
-- **Real streaming** — SSE-based streaming with start/delta/end events for text, reasoning, and tool calls across all providers
+- **Real streaming** — SSE-based streaming with start/delta/end events for text, reasoning, and tool calls across all providers; HTTP errors keep their status, and failed connects are retried
 - **Multi-turn conversations** — continue previous conversations with full message history
 - **Middleware** — composable request/result transformers
 - **Simulation testing** — deterministic multi-step agent testing without API calls
-- **Pure Gleam** — no FFI, no macros, no magic. BEAM-only target.
+- **Almost pure Gleam** — no macros, no magic. The only FFI is one small Erlang module for streaming HTTP (see [Target](#target)). BEAM-only target.
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
@@ -447,7 +447,11 @@ The benchmarks run in CI on every push.
 
 ## Target
 
-Glean runs on the **BEAM** (Erlang VM) only. JavaScript is not supported — the framework depends on `gleam_httpc`, `gleam_erlang`, and `gleam_otp` for HTTP, process management, and SSE streaming.
+Glean runs on the **BEAM** (Erlang VM) only. JavaScript is not supported — the framework uses `gleam_httpc` for regular requests, `gleam_erlang` for processes, and OTP's `httpc` for streaming.
+
+### FFI
+
+There is one FFI module, `src/glean_http_stream_ffi.erl` (about 60 lines). `gleam_httpc` only returns whole responses, so streaming responses use OTP `httpc`'s stream mode directly: the FFI starts the request (with TLS certificate and hostname verification), and hands each body chunk, the HTTP status of an error response, or a connection failure to Gleam. Everything else, including SSE parsing (`glean/providers/sse`), is Gleam. JSON never goes through FFI.
 
 ## Development
 

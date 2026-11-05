@@ -44,6 +44,10 @@ names; the compiler points at each one.
 - Token usage in OpenAI-compatible streams (`stream_options.include_usage`).
 - Retries with jitter, `Retry-After` support, and retries for failed
   connections, 408 and 409.
+- Multi-turn streaming: `run.stream_messages` and `run.continue_stream`.
+- Streaming errors keep the HTTP status and body (a bad key is a 401,
+  not "stream closed early"), and streaming requests are retried like
+  normal ones before the first event arrives.
 - Micro-benchmarks: `gleam run -m glean_bench` (also run in CI).
 - CHANGELOG and LICENSE files.
 
@@ -74,6 +78,10 @@ names; the compiler points at each one.
   OpenAI o1 and GPT-5 "pro" models (Responses API only).
 - DeepSeek base URL is `https://api.deepseek.com`; MiniMax base URL is
   `https://api.minimax.io/v1`.
+- Streaming no longer uses `httpp`. A small Erlang FFI over OTP `httpc`
+  (`src/glean_http_stream_ffi.erl`) plus a Gleam SSE parser replace it,
+  which drops httpp, hackney and seven rebar3 packages from the dependency
+  tree. The unused `gleam_otp` dependency is removed too.
 - `make release` runs the format check and tests first. The publish script
   takes `HEXPM_API_KEY` from the environment and falls back to
   `.hex_api_key`.
