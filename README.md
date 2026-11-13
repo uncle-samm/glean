@@ -529,9 +529,9 @@ Network time dominates real agent runs; glean's own work is small. Numbers from 
 | Decode a 10 KB OpenAI response | 30 µs |
 | Validate a 500-item array against a schema | 1.2 ms |
 | Process 1000 streamed SSE chunks | 5.6 ms |
-| 10-step tool loop with the test provider | 35 µs |
+| 10-step tool loop with the test provider | 0.14 ms |
 
-The benchmarks run in CI on every push.
+The tool loop spends most of its time starting the process each tool call runs in, about 10 µs per call. The benchmarks run in CI on every push.
 
 ## Target
 
