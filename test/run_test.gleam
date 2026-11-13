@@ -241,7 +241,7 @@ pub fn json_output_mismatch_is_an_error_test() {
     |> agent.json_output(schema: Some(person), name: None)
 
   case run.generate(a, Nil, "Who?") {
-    Error(error.OutputValidationError(errors)) ->
+    Error(error.OutputValidationError(errors:, ..)) ->
       errors
       |> should.equal([
         error.ValidationError(path: ["name"], message: "Missing required field"),

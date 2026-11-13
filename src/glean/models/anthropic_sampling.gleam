@@ -107,6 +107,13 @@ pub fn stop_sequences(
   )
 }
 
+/// Cache the prompt: the tools, the system prompt and the conversation so
+/// far are read from Claude's cache on the next call. See
+/// `glean/models/anthropic.prompt_caching`.
+pub fn prompt_caching(m: ClaudeSampling) -> ClaudeSampling {
+  ClaudeSampling(..m, config: config.prompt_caching(m.config, True))
+}
+
 // ---------------------------------------------------------------------------
 // Build
 // ---------------------------------------------------------------------------

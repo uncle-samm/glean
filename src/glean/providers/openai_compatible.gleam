@@ -9,10 +9,12 @@
 //// ```
 ////
 //// Reasoning returned as `reasoning_content` (DeepSeek, Qwen, Kimi,
-//// MiniMax) or `reasoning` (OpenRouter) is surfaced as reasoning content and
-//// `ReasoningDelta` stream events.
+//// MiniMax), `reasoning` (OpenRouter) or `thinking` content parts (Mistral's
+//// Magistral) is surfaced as reasoning content and `ReasoningDelta` stream
+//// events.
 
 import gleam/dynamic/decode
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -30,7 +32,8 @@ import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
 import glean/providers/sse
 import glean/schema
-import glean/stream.{type StreamEvent, type Usage, Usage}
+import glean/stream.{type StreamEvent}
+import glean/usage.{type Usage, Usage}
 
 /// Create a Provider from an OpenAI-compatible config.
 pub fn create(
@@ -54,7 +57,7 @@ fn do_generate(
   provider_name: String,
   gen_request: GenerateRequest,
 ) -> Result(GenerateResult, GleanError) {
-  let body = encode_request(config, gen_request, False)
+  use body <- result.try(encode_request(config, gen_request, False))
   use response_body <- result.try(
     http_utils.send_post(
       config,
@@ -80,11 +83,32 @@ pub opaque type StreamAccumulator {
     usage: Usage,
     /// True once a chunk carrying a finish_reason has been seen.
     finished: Bool,
+    /// The text or reasoning whose start event was sent and whose end
+    /// event wasn't yet.
+    open: OpenPart,
   )
 }
 
 type StreamingToolCall {
-  StreamingToolCall(index: Int, id: String, name: StringTree, args: StringTree)
+  StreamingToolCall(
+    index: Int,
+    id: String,
+    name: StringTree,
+    args: StringTree,
+    /// The stream id its events carry.
+    event_id: String,
+    /// Whether its end event was sent.
+    ended: Bool,
+  )
+}
+
+/// Chat Completions streams have no start and end markers, so glean makes
+/// them: a part starts with its first delta and ends when another kind of
+/// content begins or the response finishes.
+type OpenPart {
+  NothingOpen
+  TextOpen(id: String)
+  ReasoningOpen(id: String)
 }
 
 fn do_stream(
@@ -93,7 +117,7 @@ fn do_stream(
   gen_request: GenerateRequest,
   on_event: fn(StreamEvent) -> Nil,
 ) -> Result(GenerateResult, GleanError) {
-  let body = encode_request(config, gen_request, True)
+  use body <- result.try(encode_request(config, gen_request, True))
   let headers = [
     #("authorization", "Bearer " <> config.api_key),
     ..list.map(config.headers, fn(h) { #(h.0, h.1) })
@@ -151,7 +175,8 @@ pub fn stream_loop(
     Ok(#(sse.Failed(reason), _)) -> fail(0, "Streaming failed: " <> reason)
     Ok(#(sse.Event(_, "[DONE]"), events)) -> {
       sse.stop(events)
-      Ok(acc)
+      // Some servers end with [DONE] alone, without a finish_reason chunk.
+      Ok(end_parts(acc, on_event))
     }
     Ok(#(sse.Event(_, data), events)) ->
       case json.parse(data, stream_error_decoder()) {
@@ -194,12 +219,19 @@ pub fn new_stream_accumulator() -> StreamAccumulator {
     finish_reason: error.Stop,
     usage: stream.zero_usage(),
     finished: False,
+    open: NothingOpen,
   )
 }
 
 /// The text accumulated so far. Public for tests.
 pub fn accumulated_text(acc: StreamAccumulator) -> String {
   string_tree.to_string(acc.text)
+}
+
+/// The usage a stream reported, or zero when it reported none. Public
+/// for tests.
+pub fn accumulated_usage(acc: StreamAccumulator) -> Usage {
+  acc.usage
 }
 
 /// Everything accumulated, in the order a non-streaming response has it:
@@ -256,6 +288,7 @@ fn process_chunk(
       let acc = case chunk.reasoning_delta {
         "" -> acc
         delta -> {
+          let acc = open_part(acc, ReasoningOpen(id: chunk.id), on_event)
           on_event(stream.ReasoningDelta(id: chunk.id, delta: delta))
           StreamAccumulator(
             ..acc,
@@ -267,21 +300,25 @@ fn process_chunk(
       let acc = case chunk.text_delta {
         "" -> acc
         delta -> {
+          let acc = open_part(acc, TextOpen(id: chunk.id), on_event)
           on_event(stream.TextDelta(id: chunk.id, delta: delta))
           StreamAccumulator(..acc, text: string_tree.append(acc.text, delta))
         }
       }
 
-      let acc =
-        list.fold(chunk.tool_call_deltas, acc, fn(a, tcd) {
-          process_tool_call_delta(a, tcd, chunk.id, on_event)
-        })
+      let acc = case chunk.tool_call_deltas {
+        [] -> acc
+        deltas ->
+          list.fold(deltas, close_open_part(acc, on_event), fn(a, tcd) {
+            process_tool_call_delta(a, tcd, chunk.id, on_event)
+          })
+      }
 
       let acc = case chunk.finish_reason {
         "" -> acc
         fr ->
           StreamAccumulator(
-            ..acc,
+            ..end_parts(acc, on_event),
             finish_reason: parse_finish_reason(fr),
             finished: True,
           )
@@ -293,6 +330,65 @@ fn process_chunk(
       }
     }
   }
+}
+
+/// Make `part` the open part: end the one that was open, if it is another
+/// kind, and send the new one's start event.
+fn open_part(
+  acc: StreamAccumulator,
+  part: OpenPart,
+  on_event: fn(StreamEvent) -> Nil,
+) -> StreamAccumulator {
+  case acc.open, part {
+    TextOpen(_), TextOpen(_) | ReasoningOpen(_), ReasoningOpen(_) -> acc
+    _, _ -> {
+      let acc = close_open_part(acc, on_event)
+      case part {
+        TextOpen(id) -> on_event(stream.TextStart(id: id))
+        ReasoningOpen(id) -> on_event(stream.ReasoningStart(id: id))
+        NothingOpen -> Nil
+      }
+      StreamAccumulator(..acc, open: part)
+    }
+  }
+}
+
+/// Send the end event of the open text or reasoning, if there is one.
+fn close_open_part(
+  acc: StreamAccumulator,
+  on_event: fn(StreamEvent) -> Nil,
+) -> StreamAccumulator {
+  case acc.open {
+    NothingOpen -> Nil
+    TextOpen(id) -> on_event(stream.TextEnd(id: id))
+    ReasoningOpen(id) -> on_event(stream.ReasoningEnd(id: id))
+  }
+  StreamAccumulator(..acc, open: NothingOpen)
+}
+
+/// The response is complete: end the open text or reasoning, and every
+/// tool call, in the order the model started them. Does nothing the second
+/// time.
+fn end_parts(
+  acc: StreamAccumulator,
+  on_event: fn(StreamEvent) -> Nil,
+) -> StreamAccumulator {
+  let acc = close_open_part(acc, on_event)
+  // `tool_calls` is newest first.
+  let tool_calls =
+    acc.tool_calls
+    |> list.reverse
+    |> list.map(fn(tc) {
+      case tc.ended {
+        True -> tc
+        False -> {
+          on_event(stream.ToolCallEnd(id: tc.event_id, tool_call_id: tc.id))
+          StreamingToolCall(..tc, ended: True)
+        }
+      }
+    })
+    |> list.reverse
+  StreamAccumulator(..acc, tool_calls: tool_calls)
 }
 
 fn process_tool_call_delta(
@@ -310,6 +406,8 @@ fn process_tool_call_delta(
         id: delta.id,
         name: string_tree.new(),
         args: string_tree.new(),
+        event_id: chunk_id,
+        ended: False,
       )
   }
   let tc = case delta.id, tc.id {
@@ -323,7 +421,7 @@ fn process_tool_call_delta(
   case existing {
     Error(Nil) ->
       on_event(stream.ToolCallStart(
-        id: chunk_id,
+        id: tc.event_id,
         tool_call_id: tc.id,
         tool_name: string_tree.to_string(tc.name),
       ))
@@ -334,7 +432,7 @@ fn process_tool_call_delta(
     "" -> tc
     args -> {
       on_event(stream.ToolCallDelta(
-        id: chunk_id,
+        id: tc.event_id,
         tool_call_id: tc.id,
         delta: args,
       ))
@@ -376,14 +474,18 @@ fn chunk_decoder() -> decode.Decoder(ChunkData) {
 
   let choice_decoder = {
     use delta <- decode.optional_field("delta", #("", "", []), {
-      use content <- decode.optional_field("content", "", nullable_string())
-      use reasoning <- decode.then(reasoning_decoder())
+      use content <- decode.optional_field(
+        "content",
+        Content(text: "", thinking: ""),
+        content_decoder(),
+      )
+      use reasoning <- decode.then(reasoning_decoder(content.thinking))
       use tool_calls <- decode.optional_field(
         "tool_calls",
         [],
         nullable_list(tool_call_delta_decoder),
       )
-      decode.success(#(content, reasoning, tool_calls))
+      decode.success(#(content.text, reasoning, tool_calls))
     })
     use finish_reason <- decode.optional_field(
       "finish_reason",
@@ -433,46 +535,138 @@ fn nullable_list(of inner: decode.Decoder(a)) -> decode.Decoder(List(a)) {
   |> decode.map(option.unwrap(_, []))
 }
 
-/// Reasoning text from either `reasoning_content` (DeepSeek, Qwen, Kimi,
-/// MiniMax) or `reasoning` (OpenRouter), on the same object as `content`.
-fn reasoning_decoder() -> decode.Decoder(String) {
+/// A message's `content`: its text, and the reasoning it carried as
+/// `thinking` parts.
+type Content {
+  Content(text: String, thinking: String)
+}
+
+/// `content` is a string, `null`, or, from Mistral, a list of parts:
+/// `{"type": "text", "text": ...}` and, from its reasoning models,
+/// `{"type": "thinking", "thinking": [parts]}`. Other part types are left
+/// out.
+fn content_decoder() -> decode.Decoder(Content) {
+  let text_part = {
+    use part_type <- decode.optional_field("type", "", decode.string)
+    use text <- decode.optional_field("text", "", nullable_string())
+    decode.success(case part_type {
+      "text" -> text
+      _ -> ""
+    })
+  }
+  let part = {
+    use part_type <- decode.optional_field("type", "", decode.string)
+    case part_type {
+      "text" -> {
+        use text <- decode.optional_field("text", "", nullable_string())
+        decode.success(Content(text: text, thinking: ""))
+      }
+      "thinking" -> {
+        use thinking <- decode.optional_field(
+          "thinking",
+          "",
+          decode.one_of(decode.string, or: [
+            decode.list(text_part) |> decode.map(string.concat),
+          ]),
+        )
+        decode.success(Content(text: "", thinking: thinking))
+      }
+      _ -> decode.success(Content(text: "", thinking: ""))
+    }
+  }
+  decode.one_of(
+    decode.string |> decode.map(fn(text) { Content(text: text, thinking: "") }),
+    or: [
+      decode.list(part)
+        |> decode.map(fn(parts) {
+          Content(
+            text: string.concat(list.map(parts, fn(p) { p.text })),
+            thinking: string.concat(list.map(parts, fn(p) { p.thinking })),
+          )
+        }),
+      decode.optional(decode.string)
+        |> decode.map(fn(text) {
+          Content(text: option.unwrap(text, ""), thinking: "")
+        }),
+    ],
+  )
+}
+
+/// Reasoning text from `reasoning_content` (DeepSeek, Qwen, Kimi, MiniMax)
+/// or `reasoning` (OpenRouter), on the same object as `content`, or else
+/// the `thinking` parts found in `content` itself (Mistral).
+fn reasoning_decoder(content_thinking: String) -> decode.Decoder(String) {
   use reasoning_content <- decode.optional_field(
     "reasoning_content",
     "",
     nullable_string(),
   )
   use reasoning <- decode.optional_field("reasoning", "", nullable_string())
-  decode.success(case reasoning_content {
-    "" -> reasoning
-    rc -> rc
+  decode.success(case reasoning_content, reasoning {
+    "", "" -> content_thinking
+    "", r -> r
+    rc, _ -> rc
   })
 }
 
+/// `prompt_tokens` and `completion_tokens` are totals: cached input and
+/// reasoning output are parts of them, reported in the `*_details` objects
+/// (or, by DeepSeek, as `prompt_cache_hit_tokens`).
 fn usage_decoder() -> decode.Decoder(Usage) {
-  use input <- decode.optional_field("prompt_tokens", 0, decode.int)
-  use output <- decode.optional_field("completion_tokens", 0, decode.int)
-  decode.success(Usage(input_tokens: input, output_tokens: output))
+  let detail = fn(name: String) {
+    decode.optional(decode.optionally_at([name], 0, nullable_int()))
+    |> decode.map(option.unwrap(_, 0))
+  }
+  use input <- decode.optional_field("prompt_tokens", 0, nullable_int())
+  use output <- decode.optional_field("completion_tokens", 0, nullable_int())
+  use cached <- decode.optional_field(
+    "prompt_tokens_details",
+    0,
+    detail("cached_tokens"),
+  )
+  use cache_hit <- decode.optional_field(
+    "prompt_cache_hit_tokens",
+    0,
+    nullable_int(),
+  )
+  use reasoning <- decode.optional_field(
+    "completion_tokens_details",
+    0,
+    detail("reasoning_tokens"),
+  )
+  decode.success(Usage(
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_tokens: int.max(cached, cache_hit),
+    cache_write_tokens: 0,
+    reasoning_tokens: reasoning,
+  ))
+}
+
+/// A number field that may be `null`; null decodes to 0.
+fn nullable_int() -> decode.Decoder(Int) {
+  decode.optional(decode.int)
+  |> decode.map(option.unwrap(_, 0))
 }
 
 // --- Request encoding ---
 
-/// Encode a Chat Completions request body. Public for tests.
+/// Encode a Chat Completions request body. Fails with `ConfigError` for a
+/// file these APIs have no way to take. Public for tests.
 pub fn encode_request(
   config: ProviderConfig,
   gen_request: GenerateRequest,
   stream: Bool,
-) -> String {
+) -> Result(String, GleanError) {
   let settings = gen_request.settings
+  use messages <- result.try(
+    list.try_map(gen_request.messages, fn(msg) {
+      encode_message(msg, config.send_reasoning_content)
+    }),
+  )
   // Fields are collected newest first and reversed once at the end.
   let fields = [
-    #(
-      "messages",
-      json.preprocessed_array(
-        list.flat_map(gen_request.messages, fn(msg) {
-          encode_message(msg, config.send_reasoning_content)
-        }),
-      ),
-    ),
+    #("messages", json.preprocessed_array(list.flatten(messages))),
     #("model", json.string(config.model)),
   ]
 
@@ -523,14 +717,9 @@ pub fn encode_request(
   }
 
   // Provider-specific extras replace glean's field of the same name.
-  let extra_names = list.map(config.extra_body, fn(field) { field.0 })
-  let fields =
-    list.filter(list.reverse(fields), fn(field) {
-      !list.contains(extra_names, field.0)
-    })
-
-  json.object(list.append(fields, config.extra_body))
+  json.object(config.with_extra_body(list.reverse(fields), config))
   |> json.to_string
+  |> Ok
 }
 
 fn add_optional(
@@ -545,55 +734,137 @@ fn add_optional(
   }
 }
 
-fn encode_message(msg: Message, send_reasoning: Bool) -> List(json.Json) {
+fn encode_message(
+  msg: Message,
+  send_reasoning: Bool,
+) -> Result(List(json.Json), GleanError) {
   case msg {
-    message.SystemMessage(content) -> [
-      json.object([
-        #("role", json.string("system")),
-        #("content", json.string(content)),
-      ]),
-    ]
-    message.UserMessage([message.UserText(text)]) -> [
-      json.object([
-        #("role", json.string("user")),
-        #("content", json.string(text)),
-      ]),
-    ]
-    message.UserMessage(content) -> [
-      json.object([
-        #("role", json.string("user")),
-        #(
-          "content",
-          json.preprocessed_array(list.map(content, encode_user_content)),
-        ),
-      ]),
-    ]
-    message.AssistantMessage(content) -> [
-      encode_assistant_message(content, send_reasoning),
-    ]
+    message.SystemMessage(content) ->
+      Ok([
+        json.object([
+          #("role", json.string("system")),
+          #("content", json.string(content)),
+        ]),
+      ])
+    message.UserMessage([message.UserText(text)]) ->
+      Ok([
+        json.object([
+          #("role", json.string("user")),
+          #("content", json.string(text)),
+        ]),
+      ])
+    message.UserMessage(content) -> {
+      use parts <- result.map(list.try_map(content, encode_user_content))
+      [
+        json.object([
+          #("role", json.string("user")),
+          #("content", json.preprocessed_array(parts)),
+        ]),
+      ]
+    }
+    message.AssistantMessage(content) ->
+      Ok([encode_assistant_message(content, send_reasoning)])
     // Each tool result must be a separate message in OpenAI format
-    message.ToolResultMessage(results) -> list.map(results, encode_tool_result)
+    message.ToolResultMessage(results) ->
+      Ok(list.map(results, encode_tool_result))
   }
 }
 
-fn encode_user_content(content: message.UserContent) -> json.Json {
+/// Images go as `image_url` parts (a URL, or the data inline), PDFs as
+/// `file` parts and WAV or MP3 audio as `input_audio` parts, both inline
+/// only. Chat Completions has no part for anything else.
+fn encode_user_content(
+  content: message.UserContent,
+) -> Result(json.Json, GleanError) {
   case content {
     message.UserText(text) ->
-      json.object([
-        #("type", json.string("text")),
-        #("text", json.string(text)),
-      ])
-    message.UserFile(data, media_type) -> {
-      let url = case data {
-        message.Base64Data(b64) -> "data:" <> media_type <> ";base64," <> b64
-        message.UrlData(url) -> url
+      Ok(
+        json.object([
+          #("type", json.string("text")),
+          #("text", json.string(text)),
+        ]),
+      )
+    message.UserFile(data, media_type) ->
+      case data, audio_format(media_type) {
+        _, _ if media_type == "application/pdf" ->
+          case data {
+            message.Base64Data(b64) ->
+              Ok(
+                json.object([
+                  #("type", json.string("file")),
+                  #(
+                    "file",
+                    json.object([
+                      #("filename", json.string("file.pdf")),
+                      #(
+                        "file_data",
+                        json.string("data:application/pdf;base64," <> b64),
+                      ),
+                    ]),
+                  ),
+                ]),
+              )
+            message.UrlData(_) ->
+              Error(unsupported_file(
+                "a PDF by URL; send its contents with Base64Data",
+              ))
+          }
+        message.Base64Data(b64), Ok(format) ->
+          Ok(
+            json.object([
+              #("type", json.string("input_audio")),
+              #(
+                "input_audio",
+                json.object([
+                  #("data", json.string(b64)),
+                  #("format", json.string(format)),
+                ]),
+              ),
+            ]),
+          )
+        message.UrlData(_), Ok(_) ->
+          Error(unsupported_file(
+            "audio by URL; send its contents with Base64Data",
+          ))
+        _, Error(Nil) ->
+          case string.starts_with(media_type, "image/"), data {
+            True, message.Base64Data(b64) ->
+              Ok(image_url_part("data:" <> media_type <> ";base64," <> b64))
+            True, message.UrlData(url) -> Ok(image_url_part(url))
+            False, _ ->
+              Error(unsupported_file(
+                "a file of type "
+                <> media_type
+                <> "; if it is text, put the text in the message",
+              ))
+          }
       }
-      json.object([
-        #("type", json.string("image_url")),
-        #("image_url", json.object([#("url", json.string(url))])),
-      ])
-    }
   }
+}
+
+fn image_url_part(url: String) -> json.Json {
+  json.object([
+    #("type", json.string("image_url")),
+    #("image_url", json.object([#("url", json.string(url))])),
+  ])
+}
+
+/// The `input_audio.format` for a media type, for the two formats the API
+/// takes.
+fn audio_format(media_type: String) -> Result(String, Nil) {
+  case media_type {
+    "audio/wav" | "audio/x-wav" | "audio/wave" -> Ok("wav")
+    "audio/mpeg" | "audio/mp3" -> Ok("mp3")
+    _ -> Error(Nil)
+  }
+}
+
+fn unsupported_file(what: String) -> GleanError {
+  error.ConfigError(
+    message: "OpenAI-compatible APIs take images, PDF files and WAV or MP3 audio. They can't take "
+    <> what
+    <> ".",
+  )
 }
 
 fn encode_assistant_message(
@@ -780,14 +1051,18 @@ fn response_decoder() -> decode.Decoder(
 
   let choice_decoder = {
     use message <- decode.field("message", {
-      use content <- decode.optional_field("content", "", nullable_string())
-      use reasoning <- decode.then(reasoning_decoder())
+      use content <- decode.optional_field(
+        "content",
+        Content(text: "", thinking: ""),
+        content_decoder(),
+      )
+      use reasoning <- decode.then(reasoning_decoder(content.thinking))
       use tool_calls <- decode.optional_field(
         "tool_calls",
         [],
         nullable_list(tool_call_decoder),
       )
-      decode.success(#(content, reasoning, tool_calls))
+      decode.success(#(content.text, reasoning, tool_calls))
     })
     use finish_reason <- decode.optional_field(
       "finish_reason",
@@ -798,7 +1073,12 @@ fn response_decoder() -> decode.Decoder(
   }
 
   use choices <- decode.field("choices", decode.list(choice_decoder))
-  use usage <- decode.optional_field("usage", Usage(0, 0), usage_decoder())
+  use usage <- decode.optional_field(
+    "usage",
+    usage.zero(),
+    decode.optional(usage_decoder())
+      |> decode.map(option.unwrap(_, usage.zero())),
+  )
 
   let #(content, finish_reason) = case choices {
     [#(#(text, reasoning, tool_calls), fr), ..] -> {
@@ -825,8 +1105,10 @@ fn parse_finish_reason(reason: String) -> FinishReason {
   case reason {
     "stop" -> error.Stop
     "length" -> error.Length
-    "tool_calls" -> error.ToolCalls
+    "tool_calls" | "function_call" -> error.ToolCalls
     "content_filter" -> error.ContentFilter
+    // OpenRouter, when the model behind it failed part way.
+    "error" -> error.FinishError
     other -> error.Other(other)
   }
 }

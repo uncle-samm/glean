@@ -1,11 +1,11 @@
 //// Google Gemini models.
 ////
 //// Supported parameters: max_output_tokens, temperature, top_p, top_k,
-//// seed, stop_sequences.
+//// seed, stop_sequences, reasoning_effort, show_reasoning.
 
 import gleam/option.{Some}
 import glean/model.{type Model, Model}
-import glean/provider.{type ModelSettings, ModelSettings}
+import glean/provider.{type ModelSettings, type ReasoningEffort, ModelSettings}
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/gemini as gemini_provider
 
@@ -127,6 +127,24 @@ pub fn stop_sequences(m: Gemini, stops: List(String)) -> Gemini {
     ..m,
     settings: ModelSettings(..m.settings, stop_sequences: Some(stops)),
   )
+}
+
+/// Set how much the model should think before answering. Sent as
+/// `thinkingLevel`, which Gemini 3 and later models take; Gemini 2.5 models
+/// reject it. Gemini's highest level is `high`, so `XHighEffort` and
+/// `MaxEffort` send that.
+pub fn reasoning_effort(m: Gemini, effort: ReasoningEffort) -> Gemini {
+  Gemini(
+    ..m,
+    settings: ModelSettings(..m.settings, reasoning_effort: Some(effort)),
+  )
+}
+
+/// Ask for the model's reasoning as text: summaries of its thoughts, in
+/// the result's reasoning content and the stream's reasoning events.
+/// Without this Gemini thinks but returns no reasoning text.
+pub fn show_reasoning(m: Gemini) -> Gemini {
+  Gemini(..m, settings: ModelSettings(..m.settings, include_reasoning: True))
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ import gleam/erlang/process
 import gleam/int
 import gleam/list
 import glean/agent
+import glean/error
 import glean/message
 import glean/run
 import glean/schema
@@ -198,4 +199,101 @@ pub fn stream_messages_adds_system_prompts_to_fresh_history_test() {
   let assert Ok(result) =
     run.stream_messages(a, Nil, [message.user("Hi")], fn(_event) { Nil })
   result.text |> should.equal("2")
+}
+
+pub fn collect_tool_calls_keeps_interleaved_calls_apart_test() {
+  // Two calls streaming at once: every delta goes to its own call.
+  let events = [
+    stream.ToolCallStart(id: "1", tool_call_id: "a", tool_name: "search"),
+    stream.ToolCallStart(id: "2", tool_call_id: "b", tool_name: "calc"),
+    stream.ToolCallDelta(id: "1", tool_call_id: "a", delta: "{\"q\":"),
+    stream.ToolCallDelta(id: "2", tool_call_id: "b", delta: "{\"n\":"),
+    stream.ToolCallDelta(id: "1", tool_call_id: "a", delta: "\"x\"}"),
+    stream.ToolCallDelta(id: "2", tool_call_id: "b", delta: "1}"),
+    stream.ToolCallEnd(id: "2", tool_call_id: "b"),
+    stream.ToolCallEnd(id: "1", tool_call_id: "a"),
+  ]
+  // In the order the calls ended.
+  stream.collect_tool_calls(events)
+  |> should.equal([
+    #("b", "calc", "{\"n\":1}"),
+    #("a", "search", "{\"q\":\"x\"}"),
+  ])
+}
+
+pub fn collect_tool_calls_leaves_out_a_call_that_never_ended_test() {
+  let events = [
+    stream.ToolCallStart(id: "1", tool_call_id: "a", tool_name: "search"),
+    stream.ToolCallDelta(id: "1", tool_call_id: "a", delta: "{\"q\":"),
+    stream.ToolCallStart(id: "2", tool_call_id: "b", tool_name: "calc"),
+    stream.ToolCallDelta(id: "2", tool_call_id: "b", delta: "{}"),
+    stream.ToolCallEnd(id: "2", tool_call_id: "b"),
+  ]
+  stream.collect_tool_calls(events) |> should.equal([#("b", "calc", "{}")])
+}
+
+pub fn collect_tool_calls_handles_a_reused_id_test() {
+  // The same id used for two calls, one after the other.
+  let events = [
+    stream.ToolCallStart(id: "1", tool_call_id: "a", tool_name: "one"),
+    stream.ToolCallDelta(id: "1", tool_call_id: "a", delta: "1"),
+    stream.ToolCallEnd(id: "1", tool_call_id: "a"),
+    stream.ToolCallStart(id: "2", tool_call_id: "a", tool_name: "two"),
+    stream.ToolCallDelta(id: "2", tool_call_id: "a", delta: "2"),
+    stream.ToolCallEnd(id: "2", tool_call_id: "a"),
+  ]
+  stream.collect_tool_calls(events)
+  |> should.equal([#("a", "one", "1"), #("a", "two", "2")])
+}
+
+pub fn a_failed_stream_ends_with_a_stream_error_event_test() {
+  let failure =
+    error.ProviderError(
+      provider: "test",
+      model: "m",
+      status: 500,
+      message: "overloaded",
+    )
+  let p =
+    function_provider.function_provider("test", fn(_request) { Error(failure) })
+  let events = process.new_subject()
+
+  run.stream(agent.new(p), Nil, "Hi", fn(event) { process.send(events, event) })
+  |> should.equal(Error(failure))
+  // The callback hears about the failure too, as the last event.
+  drain(events, [])
+  |> should.equal([
+    stream.StepStart(step: 0),
+    stream.StreamError(message: error.to_string(failure)),
+  ])
+}
+
+pub fn a_stream_that_runs_out_of_steps_ends_with_a_stream_error_event_test() {
+  let p =
+    function_provider.function_provider("test", fn(_request) {
+      Ok(provider.tool_call_result([#("c1", "missing", "{}")]))
+    })
+  let events = process.new_subject()
+  let assert Error(error.MaxStepsExceeded(..) as err) =
+    run.stream(agent.new(p) |> agent.max_steps(1), Nil, "Hi", fn(event) {
+      process.send(events, event)
+    })
+  list.last(drain(events, []))
+  |> should.equal(Ok(stream.StreamError(message: error.to_string(err))))
+}
+
+pub fn a_successful_stream_has_no_stream_error_event_test() {
+  let p = provider.test_provider([TextResponse("Hi")])
+  let events = process.new_subject()
+  let assert Ok(_) =
+    run.stream(agent.new(p), Nil, "Hello", fn(event) {
+      process.send(events, event)
+    })
+  list.any(drain(events, []), fn(event) {
+    case event {
+      stream.StreamError(..) -> True
+      _ -> False
+    }
+  })
+  |> should.be_false
 }
