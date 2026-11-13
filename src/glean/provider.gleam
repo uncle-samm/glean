@@ -56,6 +56,10 @@ pub type GeneratedContent {
     tool_name: String,
     arguments_json: String,
   )
+  /// A file the model produced, such as an image from one of Gemini's image
+  /// models: base64 `data` of the given media type. `signature` is the
+  /// provider's token for sending the file back on the next turn.
+  GeneratedFile(media_type: String, data: String, signature: Option(String))
 }
 
 /// Model settings for controlling generation behavior.
@@ -72,6 +76,11 @@ pub type ModelSettings {
     /// How much a reasoning model should think before answering.
     /// Only sent by providers whose API has the parameter.
     reasoning_effort: Option(ReasoningEffort),
+    /// Ask for the model's reasoning as text. Claude and Gemini think
+    /// either way but only return the text (a summary of it) when asked;
+    /// without this their reasoning content and `ReasoningDelta` events are
+    /// empty. Other providers return what they return, and ignore this.
+    include_reasoning: Bool,
   )
 }
 
@@ -82,14 +91,23 @@ pub type ReasoningEffort {
   LowEffort
   MediumEffort
   HighEffort
+  /// Above `high`: Claude Opus 4.7 and later, and OpenAI's newest GPT-5
+  /// models. Gemini has no such level and gets `high`.
+  XHighEffort
+  /// The most a model can think: current Claude models and DeepSeek.
+  /// Gemini has no such level and gets `high`.
+  MaxEffort
 }
 
-/// The wire value most OpenAI-compatible APIs use for `reasoning_effort`.
+/// The wire value most OpenAI-compatible APIs use for `reasoning_effort`,
+/// and Claude for `output_config.effort`.
 pub fn reasoning_effort_to_string(effort: ReasoningEffort) -> String {
   case effort {
     LowEffort -> "low"
     MediumEffort -> "medium"
     HighEffort -> "high"
+    XHighEffort -> "xhigh"
+    MaxEffort -> "max"
   }
 }
 
@@ -128,6 +146,7 @@ pub fn default_settings() -> ModelSettings {
     presence_penalty: None,
     frequency_penalty: None,
     reasoning_effort: None,
+    include_reasoning: False,
   )
 }
 

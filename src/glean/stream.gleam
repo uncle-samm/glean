@@ -1,12 +1,19 @@
 /// Streaming event types.
 /// Follows the start/delta/end pattern from Vercel AI SDK.
+///
+/// Every provider sends each piece of text, reasoning and tool call as a
+/// start event, any number of deltas, and an end event, all with the same
+/// `id`.
+import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/string_tree
 import glean/error.{type FinishReason}
+import glean/usage
 
-pub type Usage {
-  Usage(input_tokens: Int, output_tokens: Int)
-}
+/// Token usage. Defined in `glean/usage`, which has its constructor.
+pub type Usage =
+  usage.Usage
 
 pub type StreamEvent {
   // --- Text ---
@@ -27,7 +34,11 @@ pub type StreamEvent {
   // --- Lifecycle ---
   StepStart(step: Int)
   StepEnd(step: Int)
+  /// The run finished. Sent once, after the last step.
   Finish(finish_reason: FinishReason, usage: Usage)
+  /// The run failed: the provider returned an error, or the final answer
+  /// did not pass validation. Sent once, just before `run.stream` returns
+  /// the error; `message` is `error.to_string` of it.
   StreamError(message: String)
 }
 
@@ -49,79 +60,85 @@ type ToolCallAccumulator {
     tool_call_id: String,
     tool_name: String,
     args: string_tree.StringTree,
+    /// Its position among the completed calls, once it has ended.
+    ended: Option(Int),
   )
 }
 
 /// Extract all completed tool calls from stream events.
-/// Returns a list of (tool_call_id, tool_name, arguments_json) tuples.
+/// Returns a list of (tool_call_id, tool_name, arguments_json) tuples, in
+/// the order the calls ended. Deltas are matched to their call by
+/// `tool_call_id`, so calls that stream at the same time don't mix. A call
+/// that never got its `ToolCallEnd` is left out.
 pub fn collect_tool_calls(
   events: List(StreamEvent),
 ) -> List(#(String, String, String)) {
-  collect_tool_calls_loop(events, [], None)
+  let calls =
+    list.fold(events, [], fn(calls: List(ToolCallAccumulator), event) {
+      case event {
+        ToolCallStart(_, tool_call_id, tool_name) -> [
+          ToolCallAccumulator(
+            tool_call_id: tool_call_id,
+            tool_name: tool_name,
+            args: string_tree.new(),
+            ended: None,
+          ),
+          ..calls
+        ]
+        ToolCallDelta(_, tool_call_id, delta) ->
+          update_open_call(calls, tool_call_id, fn(call) {
+            ToolCallAccumulator(
+              ..call,
+              args: string_tree.append(call.args, delta),
+            )
+          })
+        ToolCallEnd(_, tool_call_id) -> {
+          let position = list.count(calls, fn(call) { call.ended != None })
+          update_open_call(calls, tool_call_id, fn(call) {
+            ToolCallAccumulator(..call, ended: Some(position))
+          })
+        }
+        _ -> calls
+      }
+    })
+  calls
+  |> list.filter_map(fn(call) {
+    case call.ended {
+      Some(position) ->
+        Ok(#(
+          position,
+          #(call.tool_call_id, call.tool_name, string_tree.to_string(call.args)),
+        ))
+      None -> Error(Nil)
+    }
+  })
+  |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
+  |> list.map(fn(entry) { entry.1 })
 }
 
-import gleam/option.{type Option, None, Some}
-
-fn collect_tool_calls_loop(
-  events: List(StreamEvent),
-  completed: List(#(String, String, String)),
-  current: Option(ToolCallAccumulator),
-) -> List(#(String, String, String)) {
-  case events {
-    [] -> list.reverse(completed)
-    [event, ..rest] ->
-      case event {
-        ToolCallStart(_, tool_call_id, tool_name) ->
-          collect_tool_calls_loop(
-            rest,
-            completed,
-            Some(ToolCallAccumulator(
-              tool_call_id: tool_call_id,
-              tool_name: tool_name,
-              args: string_tree.new(),
-            )),
-          )
-        ToolCallDelta(_, _, delta) ->
-          case current {
-            Some(acc) ->
-              collect_tool_calls_loop(
-                rest,
-                completed,
-                Some(
-                  ToolCallAccumulator(
-                    ..acc,
-                    args: string_tree.append(acc.args, delta),
-                  ),
-                ),
-              )
-            None -> collect_tool_calls_loop(rest, completed, current)
-          }
-        ToolCallEnd(_, _) ->
-          case current {
-            Some(acc) -> {
-              let entry = #(
-                acc.tool_call_id,
-                acc.tool_name,
-                string_tree.to_string(acc.args),
-              )
-              collect_tool_calls_loop(rest, [entry, ..completed], None)
-            }
-            None -> collect_tool_calls_loop(rest, completed, current)
-          }
-        _ -> collect_tool_calls_loop(rest, completed, current)
+/// Change the newest call with this id that hasn't ended yet. `calls` is
+/// newest first.
+fn update_open_call(
+  calls: List(ToolCallAccumulator),
+  tool_call_id: String,
+  change: fn(ToolCallAccumulator) -> ToolCallAccumulator,
+) -> List(ToolCallAccumulator) {
+  case calls {
+    [] -> []
+    [call, ..rest] ->
+      case call.tool_call_id == tool_call_id && call.ended == None {
+        True -> [change(call), ..rest]
+        False -> [call, ..update_open_call(rest, tool_call_id, change)]
       }
   }
 }
 
 /// Add usage from two Usage values together.
 pub fn add_usage(a: Usage, b: Usage) -> Usage {
-  Usage(
-    input_tokens: a.input_tokens + b.input_tokens,
-    output_tokens: a.output_tokens + b.output_tokens,
-  )
+  usage.add(a, b)
 }
 
 /// Zero usage (useful as initial accumulator).
 pub fn zero_usage() -> Usage {
-  Usage(input_tokens: 0, output_tokens: 0)
+  usage.zero()
 }

@@ -75,7 +75,7 @@ pub fn object_schema_test() {
 pub fn nullable_schema_test() {
   let s = schema.nullable(schema.string())
   let json_str = schema.to_json_string(s)
-  should.be_true(contains(json_str, "\"oneOf\""))
+  should.be_true(contains(json_str, "\"anyOf\""))
   should.be_true(contains(json_str, "\"null\""))
 }
 

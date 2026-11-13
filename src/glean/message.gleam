@@ -30,6 +30,12 @@ pub type AssistantContent {
     tool_name: String,
     arguments_json: String,
   )
+  /// A file the model produced earlier in the conversation, such as an
+  /// image from one of Gemini's image models: base64 `data` of the given
+  /// media type, and the provider's `signature` for sending it back. Only
+  /// Gemini takes files back from the model; other providers leave them
+  /// out of the history they are sent.
+  AssistantFile(media_type: String, data: String, signature: Option(String))
 }
 
 pub type ToolResult {

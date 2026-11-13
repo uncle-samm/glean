@@ -1,6 +1,6 @@
 /// Agent configuration (builder pattern).
 /// Immutable config — running an agent produces a RunResult; the agent is reusable.
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 import glean/model.{type Model}
 import glean/provider.{
   type ModelSettings, type Provider, type ResponseFormat, type ToolChoice,
@@ -30,6 +30,13 @@ pub type Agent(deps) {
     /// Run several tool calls from one model response concurrently
     /// (default: True). Results are always returned in the model's order.
     parallel_tool_calls: Bool,
+    /// The longest one tool call may take, retries included, in
+    /// milliseconds (default: no limit). A call that takes longer is
+    /// stopped and reported to the model as an error.
+    tool_timeout_ms: Option(Int),
+    /// How many times the model is asked again when its final answer
+    /// doesn't match the JSON schema (default: 1).
+    output_retries: Int,
   )
 }
 
@@ -45,6 +52,8 @@ pub fn new(provider: Provider) -> Agent(deps) {
     max_steps: 10,
     response_format: provider.TextFormat,
     parallel_tool_calls: True,
+    tool_timeout_ms: None,
+    output_retries: 1,
   )
 }
 
@@ -71,7 +80,10 @@ pub fn tool_choice(agent: Agent(deps), choice: ToolChoice) -> Agent(deps) {
 
 /// Ask for JSON output. With a schema, the provider is asked to follow it
 /// (where the API supports schemas) and the final answer is validated
-/// against it: a mismatch fails the run with `OutputValidationError`.
+/// against it. On a mismatch the model is told what is wrong and asked
+/// again, as often as `output_retries` allows (once by default); after that
+/// the run fails with `OutputValidationError`, which carries the answer,
+/// the conversation and the tokens used.
 ///
 /// ```gleam
 /// agent.from(model)
@@ -89,6 +101,25 @@ pub fn json_output(
 /// your tools must not run at the same time (e.g. they share a resource).
 pub fn sequential_tool_calls(agent: Agent(deps)) -> Agent(deps) {
   Agent(..agent, parallel_tool_calls: False)
+}
+
+/// Limit how long one tool call may take, retries included. A call that
+/// takes longer is stopped, and the model gets an error result saying so,
+/// like any other tool failure. Without a limit, a tool that never returns
+/// keeps the run waiting forever.
+pub fn tool_timeout(agent: Agent(deps), ms: Int) -> Agent(deps) {
+  let assert True = ms > 0
+  Agent(..agent, tool_timeout_ms: Some(ms))
+}
+
+/// Set how many times the model is asked again when its final answer
+/// doesn't match the schema given to `json_output` (default: 1; 0 fails the
+/// run on the first mismatch). Each retry is one more step, so it also
+/// counts towards `max_steps`. An answer cut off at the output token limit
+/// is never retried: it would be cut off again.
+pub fn output_retries(agent: Agent(deps), retries: Int) -> Agent(deps) {
+  let assert True = retries >= 0
+  Agent(..agent, output_retries: retries)
 }
 
 /// Set the maximum number of agent loop steps.
@@ -109,6 +140,8 @@ pub fn from(model: Model) -> Agent(deps) {
     max_steps: 10,
     response_format: provider.TextFormat,
     parallel_tool_calls: True,
+    tool_timeout_ms: None,
+    output_retries: 1,
   )
 }
 

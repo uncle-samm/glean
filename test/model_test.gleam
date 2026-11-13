@@ -157,7 +157,8 @@ fn deepseek_body(cfg: config.ProviderConfig) -> String {
       settings: provider.default_settings(),
       response_format: provider.TextFormat,
     )
-  openai_compatible.encode_request(cfg, request, False)
+  let assert Ok(body) = openai_compatible.encode_request(cfg, request, False)
+  body
 }
 
 pub fn deepseek_thinking_toggle_test() {
@@ -199,4 +200,50 @@ pub fn agent_from_model_test() {
   let model = openai_reasoning.gpt5_nano(api_key: "k") |> openai_reasoning.build
   let a = agent.from(model)
   a.provider.model_id |> should.equal("gpt-5-nano")
+}
+
+pub fn claude_fable_5_2_test() {
+  let model = anthropic_model.fable_5_2(api_key: "k") |> anthropic_model.build
+  model.provider.name |> should.equal("anthropic")
+  model.provider.model_id |> should.equal("claude-fable-5-2")
+  // Nothing is asked of the model unless the builder says so.
+  model.settings.reasoning_effort |> should.equal(None)
+  model.settings.include_reasoning |> should.be_false
+}
+
+pub fn claude_reasoning_setters_test() {
+  let model =
+    anthropic_model.opus_4_8(api_key: "k")
+    |> anthropic_model.reasoning_effort(provider.XHighEffort)
+    |> anthropic_model.show_reasoning
+    |> anthropic_model.build
+  model.settings.reasoning_effort |> should.equal(Some(provider.XHighEffort))
+  model.settings.include_reasoning |> should.be_true
+}
+
+pub fn new_effort_levels_have_wire_names_test() {
+  provider.reasoning_effort_to_string(provider.LowEffort)
+  |> should.equal("low")
+  provider.reasoning_effort_to_string(provider.XHighEffort)
+  |> should.equal("xhigh")
+  provider.reasoning_effort_to_string(provider.MaxEffort)
+  |> should.equal("max")
+}
+
+pub fn gemini_reasoning_setters_test() {
+  let model =
+    gemini_model.pro_3_1(api_key: "k")
+    |> gemini_model.reasoning_effort(provider.LowEffort)
+    |> gemini_model.show_reasoning
+    |> gemini_model.build
+  model.settings.reasoning_effort |> should.equal(Some(provider.LowEffort))
+  model.settings.include_reasoning |> should.be_true
+}
+
+pub fn config_defaults_test() {
+  let cfg = config.new(api_key: "k", model: "m")
+  // Ten minutes: a long answer from a reasoning model takes minutes.
+  cfg.timeout_ms |> should.equal(600_000)
+  cfg.prompt_caching |> should.be_false
+  { cfg |> config.prompt_caching(True) }.prompt_caching |> should.be_true
 }
