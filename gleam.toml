@@ -1,5 +1,5 @@
 name = "glean"
-version = "0.2.0"
+version = "0.3.0"
 gleam = ">= 1.14.0"
 description = "A Gleam framework for building AI agents — type-safe, multi-provider, with tool calling, streaming, and simulation testing"
 licences = ["MIT"]
