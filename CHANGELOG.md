@@ -1,9 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-11-15
 
-This release has breaking changes, listed under Changed. The next version
-is 0.3.0.
+This release has breaking changes, listed under Changed.
 
 ### Fixed
 
