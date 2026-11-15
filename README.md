@@ -558,12 +558,14 @@ gleam run -m glean_bench   # Micro-benchmarks (encoding, decoding, validation, r
 
 ## Publishing
 
+Publishing a GitHub release publishes that version to Hex. The release's tag must be `v` plus the version in `gleam.toml`, such as `v0.3.0`. The Release workflow runs the format check and the tests at that tag, then publishes with the `HEXPM_API_KEY` repository secret.
+
 ```sh
-# Full release: runs the tests, pushes, tags, and publishes to Hex
+# Runs the checks, pushes main, and creates the GitHub release with gh
 make release
 ```
 
-The publish step reads `HEXPM_API_KEY` from the environment, or the git-ignored `.hex_api_key` file.
+`make publish` still publishes from your own machine. It reads `HEXPM_API_KEY` from the environment, or the git-ignored `.hex_api_key` file.
 
 ## License
 

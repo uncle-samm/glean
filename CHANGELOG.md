@@ -106,6 +106,11 @@ This release has breaking changes, listed under Changed.
 - `gleam_httpc` and `gleam_http` are no longer dependencies. The FFI
   module is now `src/glean_http_ffi.erl` and does both kinds of request.
 - Dependencies updated: `gleam_stdlib` 1.0.5, `gleeunit` 1.11.0.
+- Publishing a GitHub release now publishes to Hex: the new Release
+  workflow runs the format check and the tests at the release's tag, then
+  publishes with the `HEXPM_API_KEY` repository secret. `make release`
+  runs the checks, pushes `main` and creates the GitHub release instead of
+  publishing from your machine. `make publish` still does that.
 
 ## 0.2.0 - 2026-11-06
 
