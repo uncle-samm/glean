@@ -1,7 +1,7 @@
 //// Server-Sent Events over a streaming HTTP POST.
 ////
 //// The HTTP part is a small Erlang FFI over OTP's `httpc`
-//// (`src/glean_http_stream_ffi.erl`); SSE parsing is pure Gleam. Unlike the
+//// (`src/glean_http_ffi.erl`); SSE parsing is pure Gleam. Unlike the
 //// previous SSE client, a non-2xx response is reported with its status and
 //// body, and failed connections and retryable statuses are retried before
 //// any event is delivered.
@@ -44,12 +44,13 @@ type Message {
   Started
   Chunk(BitArray)
   Finished
-  Status(Int, Option(String), BitArray)
+  /// Status, the `retry-after-ms` header, the `retry-after` header, body.
+  Status(Int, Option(String), Option(String), BitArray)
   RequestFailed(String)
   TimedOut
 }
 
-@external(erlang, "glean_http_stream_ffi", "start")
+@external(erlang, "glean_http_ffi", "start")
 fn ffi_start(
   url: String,
   headers: List(#(String, String)),
@@ -57,16 +58,17 @@ fn ffi_start(
   connect_timeout_ms: Int,
 ) -> Result(RequestId, String)
 
-@external(erlang, "glean_http_stream_ffi", "next")
+@external(erlang, "glean_http_ffi", "next")
 fn ffi_next(request: RequestId, timeout_ms: Int) -> Message
 
-@external(erlang, "glean_http_stream_ffi", "cancel")
+@external(erlang, "glean_http_ffi", "cancel")
 fn ffi_cancel(request: RequestId) -> Nil
 
-/// Start a streaming POST. Retries failed connections and retryable
-/// statuses (429, 5xx, ...) the way non-streaming requests do, but only
-/// before the first byte of the response body; a stream is never restarted
-/// once events have been delivered.
+/// Start a streaming POST. Retries failed connections, retryable statuses
+/// (429, 5xx, ...) and a response that doesn't start within the timeout,
+/// the way non-streaming requests do, but only before the first byte of
+/// the response body; a stream is never restarted once events have been
+/// delivered.
 ///
 /// Must be called from the process that will read the stream.
 pub fn start(
@@ -75,7 +77,14 @@ pub fn start(
   headers: List(#(String, String)),
   body: String,
 ) -> Stream {
-  start_attempt(config, url, headers, body, 0, config.initial_retry_delay_ms)
+  start_attempt(
+    config,
+    url,
+    http_utils.request_headers(headers),
+    body,
+    0,
+    config.initial_retry_delay_ms,
+  )
 }
 
 fn start_attempt(
@@ -87,10 +96,10 @@ fn start_attempt(
   delay_ms: Int,
 ) -> Stream {
   let can_retry = attempt < config.max_retries
-  let retry = fn(retry_after: Option(String)) {
+  let retry = fn(server_delay_ms: Option(Int)) {
     process.sleep(http_utils.retry_delay(
       delay_ms,
-      retry_after,
+      server_delay_ms,
       int.random(delay_ms / 2 + 1),
     ))
     start_attempt(config, url, headers, body, attempt + 1, delay_ms * 2)
@@ -102,9 +111,13 @@ fn start_attempt(
         Started -> Stream(Some(request), <<>>, [], False)
         Chunk(bits) -> feed(Stream(Some(request), <<>>, [], False), bits)
         Finished -> from_events([Closed])
-        Status(status, retry_after, response_body) ->
+        Status(status, retry_after_ms, retry_after, response_body) ->
           case can_retry && http_utils.is_retryable(status) {
-            True -> retry(retry_after)
+            True ->
+              retry(http_utils.server_retry_delay_ms(
+                retry_after_ms: retry_after_ms,
+                retry_after: retry_after,
+              ))
             False -> from_events([HttpStatus(status, to_text(response_body))])
           }
         RequestFailed(reason) ->
@@ -114,7 +127,11 @@ fn start_attempt(
           }
         TimedOut -> {
           ffi_cancel(request)
-          Stream(None, <<>>, [], False)
+          case can_retry {
+            True -> retry(None)
+            // Nothing arrives from this stream: `next` reports a timeout.
+            False -> Stream(None, <<>>, [], False)
+          }
         }
       }
   }
@@ -155,7 +172,7 @@ pub fn next(
             timeout_ms,
           )
         }
-        Status(status, _, body) ->
+        Status(status, _, _, body) ->
           Ok(#(HttpStatus(status, to_text(body)), Stream(..stream, done: True)))
         RequestFailed(reason) ->
           Ok(#(Failed(reason), Stream(..stream, done: True)))

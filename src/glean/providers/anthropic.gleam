@@ -3,7 +3,15 @@
 //// Thinking blocks (including redacted ones) are decoded with their
 //// signatures and sent back unchanged on the next turn, which Claude
 //// requires when thinking and tool use are combined.
+////
+//// Current Claude models don't return the text of their thinking unless
+//// asked: set `include_reasoning` (the model builder's `show_reasoning`)
+//// to get a summary of it as reasoning content and `ReasoningDelta`
+//// events. Setting it, or a `reasoning_effort`, also sends
+//// `thinking: {"type": "adaptive"}`, which Claude Opus 4.7 and 4.8 need
+//// before they think at all.
 
+import gleam/bit_array
 import gleam/dynamic/decode
 import gleam/int
 import gleam/json
@@ -23,7 +31,8 @@ import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
 import glean/providers/sse
 import glean/schema
-import glean/stream.{type StreamEvent, type Usage, Usage}
+import glean/stream.{type StreamEvent}
+import glean/usage.{type Usage, Usage}
 
 const base_url = "https://api.anthropic.com/v1"
 
@@ -75,7 +84,7 @@ fn do_generate(
   config: ProviderConfig,
   gen_request: GenerateRequest,
 ) -> Result(GenerateResult, GleanError) {
-  use body <- result.try(encode_request(config.model, gen_request, False))
+  use body <- result.try(encode_request(config, gen_request, False))
   use response_body <- result.try(http_utils.send_post(
     config,
     "anthropic",
@@ -121,7 +130,7 @@ fn do_stream(
   gen_request: GenerateRequest,
   on_event: fn(StreamEvent) -> Nil,
 ) -> Result(GenerateResult, GleanError) {
-  use body <- result.try(encode_request(config.model, gen_request, True))
+  use body <- result.try(encode_request(config, gen_request, True))
   let headers =
     list.append(
       auth_headers(config),
@@ -248,15 +257,11 @@ fn process_anthropic_event(
 ) -> StreamAccumulator {
   case event_type {
     Some("message_start") -> {
-      let usage_decoder = {
-        use usage <- decode.subfield(["message", "usage"], {
-          use input <- decode.field("input_tokens", decode.int)
-          use output <- decode.optional_field("output_tokens", 0, decode.int)
-          decode.success(Usage(input_tokens: input, output_tokens: output))
-        })
+      let message_usage_decoder = {
+        use usage <- decode.subfield(["message", "usage"], usage_decoder())
         decode.success(usage)
       }
-      case json.parse(data, usage_decoder) {
+      case json.parse(data, message_usage_decoder) {
         Ok(usage) -> StreamAccumulator(..acc, usage: usage)
         Error(_) -> acc
       }
@@ -435,9 +440,11 @@ fn update_block(
 
 // --- Request encoding (Anthropic format) ---
 
-/// Encode a Messages API request body. Public for tests.
+/// Encode a Messages API request body. Fails with `ConfigError` for JSON
+/// output without a schema, and for a file Claude has no way to take.
+/// Public for tests.
 pub fn encode_request(
-  model: String,
+  config: ProviderConfig,
   gen_request: GenerateRequest,
   stream: Bool,
 ) -> Result(String, GleanError) {
@@ -447,6 +454,7 @@ pub fn encode_request(
   ))
   let #(system_parts, conversation_messages) =
     split_system_messages(gen_request.messages)
+  use messages <- result.try(list.try_map(conversation_messages, encode_message))
 
   // Fields are collected newest first and reversed once at the end.
   let fields = [
@@ -457,14 +465,8 @@ pub fn encode_request(
         default_max_tokens,
       )),
     ),
-    #(
-      "messages",
-      json.preprocessed_array(list.flat_map(
-        conversation_messages,
-        encode_message,
-      )),
-    ),
-    #("model", json.string(model)),
+    #("messages", json.preprocessed_array(list.flatten(messages))),
+    #("model", json.string(config.model)),
   ]
 
   let fields = case system_parts {
@@ -504,13 +506,41 @@ pub fn encode_request(
       json.array(stops, json.string)
     })
     |> add_optional("output_config", output_config, fn(c) { c })
+    |> add_optional("thinking", encode_thinking(settings), fn(t) { t })
+
+  // A top-level `cache_control` lets the API place the cache breakpoint on
+  // the last block it can cache, and move it along as the conversation
+  // grows.
+  let fields = case config.prompt_caching {
+    True -> [
+      #("cache_control", json.object([#("type", json.string("ephemeral"))])),
+      ..fields
+    ]
+    False -> fields
+  }
 
   let fields = case stream {
     True -> [#("stream", json.bool(True)), ..fields]
     False -> fields
   }
 
-  Ok(json.to_string(json.object(list.reverse(fields))))
+  json.object(config.with_extra_body(list.reverse(fields), config))
+  |> json.to_string
+  |> Ok
+}
+
+/// `thinking`, when the settings ask for reasoning. Current Claude models
+/// only take adaptive thinking; most think without being asked, but Opus
+/// 4.7 and 4.8 don't, and none returns the text of its thinking unless
+/// `display` asks for the summary.
+fn encode_thinking(settings: provider.ModelSettings) -> Option(json.Json) {
+  let adaptive = #("type", json.string("adaptive"))
+  case settings.include_reasoning, settings.reasoning_effort {
+    True, _ ->
+      Some(json.object([adaptive, #("display", json.string("summarized"))]))
+    False, Some(_) -> Some(json.object([adaptive]))
+    False, None -> None
+  }
 }
 
 /// Build `output_config`: structured output (`format`) and `effort`.
@@ -530,7 +560,9 @@ fn encode_output_config(
           "format",
           json.object([
             #("type", json.string("json_schema")),
-            #("schema", schema.to_json_strict(s)),
+            // Structured outputs reject number ranges and string lengths;
+            // glean checks them in the answer itself.
+            #("schema", schema.to_json_strict_without_limits(s)),
           ]),
         ),
       ])
@@ -584,78 +616,127 @@ fn split_system_messages(
   #(system, non_system)
 }
 
-fn encode_message(msg: Message) -> List(json.Json) {
+fn encode_message(msg: Message) -> Result(List(json.Json), GleanError) {
   case msg {
-    message.SystemMessage(_) -> []
-    message.UserMessage(content) -> [
-      json.object([
-        #("role", json.string("user")),
-        #(
-          "content",
-          json.preprocessed_array(list.map(content, encode_user_content)),
-        ),
-      ]),
-    ]
-    message.AssistantMessage(content) -> [
-      json.object([
-        #("role", json.string("assistant")),
-        #(
-          "content",
-          json.preprocessed_array(list.filter_map(
-            content,
-            encode_assistant_content,
-          )),
-        ),
-      ]),
-    ]
-    message.ToolResultMessage(results) -> [
-      json.object([
-        #("role", json.string("user")),
-        #(
-          "content",
-          json.preprocessed_array(list.map(results, encode_tool_result)),
-        ),
-      ]),
-    ]
+    message.SystemMessage(_) -> Ok([])
+    message.UserMessage(content) -> {
+      use parts <- result.map(list.try_map(content, encode_user_content))
+      [
+        json.object([
+          #("role", json.string("user")),
+          #("content", json.preprocessed_array(parts)),
+        ]),
+      ]
+    }
+    message.AssistantMessage(content) ->
+      Ok([
+        json.object([
+          #("role", json.string("assistant")),
+          #(
+            "content",
+            json.preprocessed_array(list.filter_map(
+              content,
+              encode_assistant_content,
+            )),
+          ),
+        ]),
+      ])
+    message.ToolResultMessage(results) ->
+      Ok([
+        json.object([
+          #("role", json.string("user")),
+          #(
+            "content",
+            json.preprocessed_array(list.map(results, encode_tool_result)),
+          ),
+        ]),
+      ])
   }
 }
 
-fn encode_user_content(content: message.UserContent) -> json.Json {
+/// JPEG, PNG, GIF and WebP images go as `image` blocks and PDFs as
+/// `document` blocks, by URL or inline; plain text goes as a `document`
+/// block with the text itself. Claude takes no other file types.
+fn encode_user_content(
+  content: message.UserContent,
+) -> Result(json.Json, GleanError) {
   case content {
     message.UserText(text) ->
-      json.object([
-        #("type", json.string("text")),
-        #("text", json.string(text)),
-      ])
-    message.UserFile(data, media_type) -> {
-      let block_type = case media_type {
-        "application/pdf" -> "document"
-        _ -> "image"
+      Ok(
+        json.object([
+          #("type", json.string("text")),
+          #("text", json.string(text)),
+        ]),
+      )
+    message.UserFile(data, media_type) ->
+      case media_type {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" ->
+          Ok(file_block("image", file_source(data, media_type)))
+        "application/pdf" ->
+          Ok(file_block("document", file_source(data, media_type)))
+        "text/plain" ->
+          case data {
+            message.Base64Data(b64) ->
+              case
+                bit_array.base64_decode(b64)
+                |> result.try(bit_array.to_string)
+              {
+                Ok(text) ->
+                  Ok(file_block(
+                    "document",
+                    json.object([
+                      #("type", json.string("text")),
+                      #("media_type", json.string("text/plain")),
+                      #("data", json.string(text)),
+                    ]),
+                  ))
+                Error(Nil) ->
+                  Error(unsupported_file(
+                    "a text/plain file whose data is not base64 of UTF-8 text",
+                  ))
+              }
+            message.UrlData(_) ->
+              Error(unsupported_file(
+                "a text file by URL; send its contents with Base64Data",
+              ))
+          }
+        other -> Error(unsupported_file("a file of type " <> other))
       }
-      let source = case data {
-        message.Base64Data(b64) ->
-          json.object([
-            #("type", json.string("base64")),
-            #("media_type", json.string(media_type)),
-            #("data", json.string(b64)),
-          ])
-        message.UrlData(url) ->
-          json.object([
-            #("type", json.string("url")),
-            #("url", json.string(url)),
-          ])
-      }
-      json.object([
-        #("type", json.string(block_type)),
-        #("source", source),
-      ])
-    }
   }
+}
+
+fn file_block(block_type: String, source: json.Json) -> json.Json {
+  json.object([#("type", json.string(block_type)), #("source", source)])
+}
+
+fn file_source(data: message.FileData, media_type: String) -> json.Json {
+  case data {
+    message.Base64Data(b64) ->
+      json.object([
+        #("type", json.string("base64")),
+        #("media_type", json.string(media_type)),
+        #("data", json.string(b64)),
+      ])
+    message.UrlData(url) ->
+      json.object([
+        #("type", json.string("url")),
+        #("url", json.string(url)),
+      ])
+  }
+}
+
+fn unsupported_file(what: String) -> GleanError {
+  error.ConfigError(
+    message: "Claude takes JPEG, PNG, GIF and WebP images, PDF files and plain text. It can't take "
+    <> what
+    <> ".",
+  )
 }
 
 /// Thinking without a signature (e.g. reasoning that came from another
-/// provider) can't be replayed to Claude, so it is left out. So is empty
-/// text, which the Messages API rejects.
+/// provider) can't be replayed to Claude, so it is left out. So are empty
+/// text, which the Messages API rejects, and files another provider's model
+/// produced, which Claude doesn't take in an assistant turn.
 fn encode_assistant_content(
   content: message.AssistantContent,
 ) -> Result(json.Json, Nil) {
@@ -677,6 +758,7 @@ fn encode_assistant_content(
         ]),
       )
     message.AssistantReasoning(_, None) -> Error(Nil)
+    message.AssistantFile(..) -> Error(Nil)
     message.AssistantRedactedReasoning(data) ->
       Ok(
         json.object([
@@ -762,22 +844,13 @@ pub fn decode_response(
 fn anthropic_response_decoder() -> decode.Decoder(
   #(List(GeneratedContent), FinishReason, Usage),
 ) {
-  let usage_decoder = {
-    use input_tokens <- decode.field("input_tokens", decode.int)
-    use output_tokens <- decode.field("output_tokens", decode.int)
-    decode.success(Usage(
-      input_tokens: input_tokens,
-      output_tokens: output_tokens,
-    ))
-  }
-
   use blocks <- decode.field("content", decode.list(content_block_decoder()))
   use stop_reason <- decode.optional_field(
     "stop_reason",
     None,
     decode.optional(decode.string),
   )
-  use usage <- decode.field("usage", usage_decoder)
+  use usage <- decode.field("usage", usage_decoder())
 
   decode.success(#(
     option.values(blocks),
@@ -786,6 +859,31 @@ fn anthropic_response_decoder() -> decode.Decoder(
       None -> error.Stop
     },
     usage,
+  ))
+}
+
+/// Claude's `input_tokens` leaves out the tokens read from and written to
+/// the prompt cache, which it reports next to it; glean's `input_tokens` is
+/// all three together.
+fn usage_decoder() -> decode.Decoder(Usage) {
+  let count = fn(name: String, next: fn(Int) -> decode.Decoder(Usage)) {
+    decode.optional_field(
+      name,
+      0,
+      decode.optional(decode.int) |> decode.map(option.unwrap(_, 0)),
+      next,
+    )
+  }
+  use input <- decode.field("input_tokens", decode.int)
+  use output <- count("output_tokens")
+  use cache_write <- count("cache_creation_input_tokens")
+  use cache_read <- count("cache_read_input_tokens")
+  decode.success(Usage(
+    input_tokens: input + cache_write + cache_read,
+    output_tokens: output,
+    cache_read_tokens: cache_read,
+    cache_write_tokens: cache_write,
+    reasoning_tokens: 0,
   ))
 }
 

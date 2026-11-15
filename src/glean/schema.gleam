@@ -173,6 +173,76 @@ pub fn to_json_strict(schema: Schema) -> Json {
   }
 }
 
+/// Convert to JSON for Claude's structured outputs: like `to_json_strict`,
+/// but without the number ranges and string lengths, which that API
+/// rejects. Each limit is written into the field's description instead, so
+/// the model still knows about it, and `validate` still checks it.
+pub fn to_json_strict_without_limits(schema: Schema) -> Json {
+  to_json_strict(limits_to_descriptions(schema))
+}
+
+fn limits_to_descriptions(schema: Schema) -> Schema {
+  case schema {
+    ObjectSchema(properties, required, description) ->
+      ObjectSchema(
+        list.map(properties, fn(p) { #(p.0, limits_to_descriptions(p.1)) }),
+        required,
+        description,
+      )
+    StringSchema(description, enum_values, min_length, max_length) -> {
+      let limit = case min_length, max_length {
+        None, None -> None
+        Some(min), None ->
+          Some("At least " <> int.to_string(min) <> " characters.")
+        None, Some(max) ->
+          Some("At most " <> int.to_string(max) <> " characters.")
+        Some(min), Some(max) ->
+          Some(
+            "Between "
+            <> int.to_string(min)
+            <> " and "
+            <> int.to_string(max)
+            <> " characters.",
+          )
+      }
+      StringSchema(describe_limit(description, limit), enum_values, None, None)
+    }
+    IntSchema(description, minimum, maximum) -> {
+      let limit = case minimum, maximum {
+        None, None -> None
+        Some(min), None -> Some("At least " <> int.to_string(min) <> ".")
+        None, Some(max) -> Some("At most " <> int.to_string(max) <> ".")
+        Some(min), Some(max) ->
+          Some(
+            "Between "
+            <> int.to_string(min)
+            <> " and "
+            <> int.to_string(max)
+            <> ".",
+          )
+      }
+      IntSchema(describe_limit(description, limit), None, None)
+    }
+    FloatSchema(..) | BoolSchema(..) -> schema
+    ArraySchema(items, description) ->
+      ArraySchema(limits_to_descriptions(items), description)
+    NullableSchema(inner) -> NullableSchema(limits_to_descriptions(inner))
+    OneOfSchema(variants, description) ->
+      OneOfSchema(list.map(variants, limits_to_descriptions), description)
+  }
+}
+
+fn describe_limit(
+  description: Option(String),
+  limit: Option(String),
+) -> Option(String) {
+  case description, limit {
+    _, None -> description
+    None, Some(limit) -> Some(limit)
+    Some(text), Some(limit) -> Some(text <> " " <> limit)
+  }
+}
+
 /// Whether this schema can be sent with OpenAI's `strict: true`.
 ///
 /// Strict mode needs an object at the root, every object property listed as
@@ -312,15 +382,18 @@ fn array_to_json(items: Schema, description: Option(String)) -> Json {
   |> json.object
 }
 
+/// `anyOf`, not `oneOf`: a value may match more than one variant (3 is an
+/// integer and a number), which `oneOf` forbids, `validate` accepts, and
+/// several providers don't support at all.
 fn nullable_to_json(inner: Schema) -> Json {
   json.object([
-    #("oneOf", json.preprocessed_array([to_json(inner), type_null()])),
+    #("anyOf", json.preprocessed_array([to_json(inner), type_null()])),
   ])
 }
 
 fn one_of_to_json(variants: List(Schema), description: Option(String)) -> Json {
   let variant_jsons = list.map(variants, to_json)
-  [#("oneOf", json.preprocessed_array(variant_jsons))]
+  [#("anyOf", json.preprocessed_array(variant_jsons))]
   |> with_description(description)
   |> json.object
 }

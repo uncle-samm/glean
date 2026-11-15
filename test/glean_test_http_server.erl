@@ -1,10 +1,15 @@
 %% A tiny HTTP server for tests: serves the given raw responses, one per
-%% connection, in order. Lets the streaming FFI be tested end to end
+%% connection, in the order the connections arrive. Lets the streaming FFI be tested end to end
 %% without touching the network.
 -module(glean_test_http_server).
--export([serve/1]).
+-export([serve/1, serve_slowly/1]).
 
 serve(Responses) ->
+    serve_slowly([{0, Response} || Response <- Responses]).
+
+%% Like serve/1, but each response is a {DelayMs, Response} pair: the
+%% server waits that long after reading the request before it answers.
+serve_slowly(Responses) ->
     {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127,0,0,1}}, {reuseaddr, true}]),
     {ok, Port} = inet:port(Listen),
     Pid = spawn(fun() -> loop(Listen, Responses) end),
@@ -13,11 +18,20 @@ serve(Responses) ->
 
 loop(Listen, []) ->
     gen_tcp:close(Listen);
-loop(Listen, [Response | Rest]) ->
+loop(Listen, [{DelayMs, Response} | Rest]) ->
     {ok, Socket} = gen_tcp:accept(Listen, 5000),
-    ok = read_request(Socket, <<>>),
-    ok = gen_tcp:send(Socket, Response),
-    gen_tcp:close(Socket),
+    %% Each connection is answered by its own process, so a slow answer
+    %% doesn't hold up the next connection.
+    Handler = spawn(fun() ->
+        receive go -> ok end,
+        ok = read_request(Socket, <<>>),
+        timer:sleep(DelayMs),
+        %% A client that gave up waiting has closed the connection.
+        _ = gen_tcp:send(Socket, Response),
+        gen_tcp:close(Socket)
+    end),
+    ok = gen_tcp:controlling_process(Socket, Handler),
+    Handler ! go,
     loop(Listen, Rest).
 
 %% Read headers, then the Content-Length body, and discard them.

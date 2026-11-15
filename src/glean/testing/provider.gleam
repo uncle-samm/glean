@@ -7,7 +7,8 @@ import glean/provider.{
   type GenerateRequest, type GenerateResult, type Provider, GenerateResult,
   GeneratedText, GeneratedToolCall, Provider,
 }
-import glean/stream.{type StreamEvent, Usage}
+import glean/stream.{type StreamEvent}
+import glean/usage
 
 /// A scripted response the test provider should return.
 pub type ScriptedResponse {
@@ -79,7 +80,7 @@ pub fn text_result(text: String) -> GenerateResult {
   GenerateResult(
     content: [GeneratedText(text: text)],
     finish_reason: error.Stop,
-    usage: Usage(input_tokens: 10, output_tokens: 5),
+    usage: usage.new(input_tokens: 10, output_tokens: 5),
     model_id: "test-model",
   )
 }
@@ -95,7 +96,7 @@ pub fn tool_call_result(
   GenerateResult(
     content: content,
     finish_reason: error.ToolCalls,
-    usage: Usage(input_tokens: 10, output_tokens: 5),
+    usage: usage.new(input_tokens: 10, output_tokens: 5),
     model_id: "test-model",
   )
 }
@@ -142,7 +143,7 @@ fn scripted_to_result(
       Ok(GenerateResult(
         content: content,
         finish_reason: error.ToolCalls,
-        usage: Usage(input_tokens: 10, output_tokens: 5),
+        usage: usage.new(input_tokens: 10, output_tokens: 5),
         model_id: "test-model",
       ))
     }

@@ -3,11 +3,20 @@
 //// A pure recursive loop: call the model, run any tools it asked for, feed
 //// the results back, and repeat until the model answers without calling a
 //// tool (or `max_steps` is reached).
+////
+//// Every tool call runs in a process of its own, so a tool that panics, or
+//// takes longer than `agent.tool_timeout` allows, can't take the run down
+//// with it: the model gets an error result and can try something else.
+//// When the process running the agent is itself stopped, its tools are
+//// stopped with it.
+//// The tool therefore does not run in the process that called `run`:
+//// `process.self()` is another process there, and a tool can't receive on
+//// a subject the caller made. Give tools what they need through `deps`.
 
 import gleam/erlang/process
 import gleam/int
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/string
 import glean/agent.{type Agent}
 import glean/error.{type FinishReason, type GleanError, MaxStepsExceeded}
@@ -61,6 +70,9 @@ type RunState(deps) {
     step: Int,
     total_usage: Usage,
     step_results: List(StepResult),
+    /// How often the model was asked again for a final answer that
+    /// matches the schema.
+    output_retries_used: Int,
   )
 }
 
@@ -157,6 +169,7 @@ fn initial_state(
     step: 0,
     total_usage: stream.zero_usage(),
     step_results: [],
+    output_retries_used: 0,
   )
 }
 
@@ -202,6 +215,7 @@ fn run_loop(state: RunState(deps)) -> Result(RunResult, GleanError) {
         max_steps: state.agent.max_steps,
         steps_taken: state.step,
         messages: state.messages,
+        usage: state.total_usage,
       ))
     False ->
       case state.agent.provider.generate(build_request(state)) {
@@ -222,17 +236,24 @@ fn run_stream_loop(
   state: RunState(deps),
   on_event: fn(StreamEvent) -> Nil,
 ) -> Result(RunResult, GleanError) {
+  // Every way the run can fail ends with a `StreamError` event, so a
+  // consumer that only watches events sees the failure too.
+  let fail = fn(err: GleanError) {
+    on_event(stream.StreamError(message: error.to_string(err)))
+    Error(err)
+  }
   case state.step >= state.agent.max_steps {
     True ->
-      Error(MaxStepsExceeded(
+      fail(MaxStepsExceeded(
         max_steps: state.agent.max_steps,
         steps_taken: state.step,
         messages: state.messages,
+        usage: state.total_usage,
       ))
     False -> {
       on_event(stream.StepStart(step: state.step))
       case state.agent.provider.stream(build_request(state), on_event) {
-        Error(err) -> Error(err)
+        Error(err) -> fail(err)
         Ok(result) -> {
           on_event(stream.StepEnd(step: state.step))
           case advance(state, result, on_event) {
@@ -243,7 +264,7 @@ fn run_stream_loop(
               ))
               Ok(run_result)
             }
-            Failed(err) -> Error(err)
+            Failed(err) -> fail(err)
             Continue(next_state) -> run_stream_loop(next_state, on_event)
           }
         }
@@ -282,8 +303,7 @@ fn advance(
   case extract_tool_calls(result.content) {
     [] -> {
       let text = extract_text(result.content)
-      case validate_output(state.agent, text) {
-        Error(err) -> Failed(err)
+      case validate_output(state.agent, text, result.finish_reason) {
         Ok(Nil) ->
           Finished(RunResult(
             text: text,
@@ -294,6 +314,31 @@ fn advance(
             steps: state.step + 1,
             step_results: new_step_results,
           ))
+        Error(errors) ->
+          case can_retry_output(state, result.finish_reason) {
+            // Tell the model what is wrong with its answer and ask again.
+            True ->
+              Continue(
+                RunState(
+                  ..state,
+                  messages: list.append(messages_with_answer, [
+                    message.user(output_retry_prompt(errors)),
+                  ]),
+                  step: state.step + 1,
+                  total_usage: new_usage,
+                  step_results: new_step_results,
+                  output_retries_used: state.output_retries_used + 1,
+                ),
+              )
+            False ->
+              Failed(error.OutputValidationError(
+                errors: errors,
+                text: text,
+                finish_reason: result.finish_reason,
+                messages: messages_with_answer,
+                usage: new_usage,
+              ))
+          }
       }
     }
     tool_calls -> {
@@ -319,15 +364,46 @@ fn advance(
 fn validate_output(
   agent: Agent(deps),
   text: String,
-) -> Result(Nil, GleanError) {
+  finish_reason: FinishReason,
+) -> Result(Nil, List(error.ValidationError)) {
   case agent.response_format {
     provider.JsonFormat(schema: Some(output_schema), ..) ->
-      case schema.validate_json(output_schema, text) {
-        Ok(_) -> Ok(Nil)
-        Error(errors) -> Error(error.OutputValidationError(errors: errors))
+      case schema.validate_json(output_schema, text), finish_reason {
+        Ok(_), _ -> Ok(Nil)
+        // "Not valid JSON" would hide what really happened.
+        Error(_), error.Length ->
+          Error([
+            error.ValidationError(
+              path: [],
+              message: "The answer was cut off at the output token limit, so its JSON is incomplete. Raise max_output_tokens.",
+            ),
+          ])
+        Error(errors), _ -> Error(errors)
       }
     _ -> Ok(Nil)
   }
+}
+
+/// Whether an answer that failed validation is worth asking for again: the
+/// agent has retries left, there is a step left to take, and the answer
+/// wasn't cut off or refused, which asking again wouldn't change.
+fn can_retry_output(
+  state: RunState(deps),
+  finish_reason: FinishReason,
+) -> Bool {
+  let answered = case finish_reason {
+    error.Length | error.ContentFilter -> False
+    _ -> True
+  }
+  answered
+  && state.output_retries_used < state.agent.output_retries
+  && state.step + 1 < state.agent.max_steps
+}
+
+fn output_retry_prompt(errors: List(error.ValidationError)) -> String {
+  "Your answer does not match the required JSON schema: "
+  <> error.validation_errors_to_string(errors)
+  <> ". Answer again with only the corrected JSON."
 }
 
 fn emit_tool_event(
@@ -376,6 +452,8 @@ fn append_assistant_message(
               message.AssistantReasoning(text, signature)
             provider.GeneratedRedactedReasoning(data) ->
               message.AssistantRedactedReasoning(data)
+            provider.GeneratedFile(media_type, data, signature) ->
+              message.AssistantFile(media_type, data, signature)
           }
         })
       list.append(messages, [
@@ -422,50 +500,204 @@ fn extract_text(content: List(GeneratedContent)) -> String {
   |> string.concat
 }
 
-/// Run every tool call from one model response. When the model asks for
-/// several tools at once (and the agent allows it), they run concurrently,
-/// each in its own process. Results always come back in the order the model
-/// asked for them.
+/// Run every tool call from one model response, each in a process of its
+/// own. When the model asks for several tools at once (and the agent allows
+/// it), they run concurrently. Results always come back in the order the
+/// model asked for them.
 fn execute_tool_calls(
   state: RunState(deps),
   calls: List(PendingToolCall),
 ) -> List(message.ToolResult) {
-  case calls, state.agent.parallel_tool_calls {
-    [_, _, ..], True -> execute_concurrently(state, calls)
-    _, _ -> list.map(calls, execute_single_tool(state, _))
+  case state.agent.parallel_tool_calls {
+    True -> run_isolated(state, calls)
+    False -> list.flat_map(calls, fn(call) { run_isolated(state, [call]) })
   }
 }
 
-fn execute_concurrently(
+/// A tool call running in its own process.
+type RunningToolCall {
+  RunningToolCall(
+    index: Int,
+    call: PendingToolCall,
+    pid: process.Pid,
+    monitor: process.Monitor,
+  )
+}
+
+/// What the caller hears while it waits for tool calls.
+type ToolCallNews {
+  ToolCallDone(index: Int, result: message.ToolResult)
+  ToolCallExited(index: Int, reason: process.ExitReason)
+  ToolCallsOutOfTime
+}
+
+/// Start every call in a process that is monitored, not linked, so one that
+/// crashes is reported and takes nothing else with it, then wait for all of
+/// them, at most as long as the agent's tool timeout.
+fn run_isolated(
   state: RunState(deps),
   calls: List(PendingToolCall),
 ) -> List(message.ToolResult) {
-  let subject = process.new_subject()
-  list.index_map(calls, fn(call, index) {
-    process.spawn(fn() {
-      process.send(subject, #(index, execute_single_tool(state, call)))
+  let results = process.new_subject()
+  let running =
+    list.index_map(calls, fn(call, index) {
+      let pid =
+        process.spawn_unlinked(fn() {
+          process.send(results, #(index, execute_single_tool(state, call)))
+        })
+      RunningToolCall(index:, call:, pid:, monitor: process.monitor(pid))
     })
-  })
-  let results = collect_results(subject, list.length(calls), [])
+  let guard = stop_with_caller(list.map(running, fn(call) { call.pid }))
+  let out_of_time = process.new_subject()
+  let timer =
+    option.map(state.agent.tool_timeout_ms, fn(ms) {
+      process.send_after(out_of_time, ms, Nil)
+    })
+
+  let finished = await_tool_calls(state, results, out_of_time, running, [])
+
+  process.kill(guard)
+
+  case timer {
+    Some(timer) -> {
+      process.cancel_timer(timer)
+      // If it fired just before it was cancelled, take its message out of
+      // the mailbox.
+      let _ = process.receive(out_of_time, 0)
+      Nil
+    }
+    None -> Nil
+  }
+  // A call that finished just as the time ran out left its result behind.
+  discard_results(results)
   // Postcondition: exactly one result per call.
-  let assert True = list.length(results) == list.length(calls)
-  results
+  let assert True = list.length(finished) == list.length(calls)
+  finished
   |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
   |> list.map(fn(entry) { entry.1 })
 }
 
-fn collect_results(
-  subject: process.Subject(#(Int, message.ToolResult)),
-  remaining: Int,
-  acc: List(#(Int, message.ToolResult)),
+/// The tool processes are not linked to the caller, so they would outlive
+/// it. This starts a process that waits for the calling process to die and
+/// then stops the tools, so that stopping a run stops its tools too. The
+/// caller kills it once the tools are done.
+fn stop_with_caller(tools: List(process.Pid)) -> process.Pid {
+  let caller = process.self()
+  process.spawn_unlinked(fn() {
+    let monitor = process.monitor(caller)
+    process.new_selector()
+    |> process.select_specific_monitor(monitor, fn(_) { Nil })
+    |> process.selector_receive_forever
+    list.each(tools, process.kill)
+  })
+}
+
+/// Take what is left of a finished batch out of the mailbox.
+fn discard_results(
+  results: process.Subject(#(Int, message.ToolResult)),
+) -> Nil {
+  case process.receive(results, 0) {
+    Ok(_) -> discard_results(results)
+    Error(Nil) -> Nil
+  }
+}
+
+fn await_tool_calls(
+  state: RunState(deps),
+  results: process.Subject(#(Int, message.ToolResult)),
+  out_of_time: process.Subject(Nil),
+  running: List(RunningToolCall),
+  finished: List(#(Int, message.ToolResult)),
 ) -> List(#(Int, message.ToolResult)) {
-  case remaining {
-    0 -> acc
-    _ ->
-      collect_results(subject, remaining - 1, [
-        process.receive_forever(subject),
-        ..acc
-      ])
+  case running {
+    [] -> finished
+    _ -> {
+      let selector =
+        process.new_selector()
+        |> process.select_map(results, fn(done) {
+          ToolCallDone(index: done.0, result: done.1)
+        })
+        |> process.select_map(out_of_time, fn(_) { ToolCallsOutOfTime })
+      let selector =
+        list.fold(running, selector, fn(selector, tool_call) {
+          process.select_specific_monitor(selector, tool_call.monitor, fn(down) {
+            ToolCallExited(tool_call.index, down.reason)
+          })
+        })
+      case process.selector_receive_forever(selector) {
+        ToolCallDone(index, result) -> {
+          let #(done, still_running) =
+            list.partition(running, fn(tool_call) { tool_call.index == index })
+          list.each(done, fn(tool_call) {
+            process.demonitor_process(tool_call.monitor)
+          })
+          await_tool_calls(state, results, out_of_time, still_running, [
+            #(index, result),
+            ..finished
+          ])
+        }
+        // A process sends its result before it exits, and the result is
+        // read first, so one that exits while it is still listed here
+        // crashed without a result.
+        ToolCallExited(index, reason) -> {
+          let #(crashed, still_running) =
+            list.partition(running, fn(tool_call) { tool_call.index == index })
+          let reports =
+            list.map(crashed, fn(tool_call) {
+              #(
+                tool_call.index,
+                tool_error(
+                  tool_call.call,
+                  "The tool crashed: " <> exit_reason_to_string(reason),
+                ),
+              )
+            })
+          await_tool_calls(
+            state,
+            results,
+            out_of_time,
+            still_running,
+            list.append(reports, finished),
+          )
+        }
+        ToolCallsOutOfTime -> {
+          let limit = case state.agent.tool_timeout_ms {
+            Some(ms) -> int.to_string(ms) <> " ms"
+            None -> panic as "glean: a tool timer fired without a tool timeout"
+          }
+          let reports =
+            list.map(running, fn(tool_call) {
+              // Kill cannot be caught, so the process is certain to go
+              // down. Waiting for that means nothing it sends can arrive
+              // after this function returns.
+              process.kill(tool_call.pid)
+              process.new_selector()
+              |> process.select_specific_monitor(tool_call.monitor, fn(_) {
+                Nil
+              })
+              |> process.selector_receive_forever
+              #(
+                tool_call.index,
+                tool_error(
+                  tool_call.call,
+                  "The tool did not finish within "
+                    <> limit
+                    <> " and was stopped",
+                ),
+              )
+            })
+          list.append(reports, finished)
+        }
+      }
+    }
+  }
+}
+
+fn exit_reason_to_string(reason: process.ExitReason) -> String {
+  case reason {
+    process.Normal -> "it exited without a result"
+    process.Killed -> "it was killed"
+    process.Abnormal(reason) -> string.slice(string.inspect(reason), 0, 500)
   }
 }
 
@@ -546,16 +778,7 @@ fn tool_error_to_string(err: GleanError) -> String {
   case err {
     error.ToolExecutionError(_, _, reason) -> reason
     error.ToolInputValidationError(_, _, errors) ->
-      "Invalid arguments: "
-      <> string.join(
-        list.map(errors, fn(e) {
-          case e.path {
-            [] -> e.message
-            path -> string.join(path, ".") <> ": " <> e.message
-          }
-        }),
-        "; ",
-      )
+      "Invalid arguments: " <> error.validation_errors_to_string(errors)
     other -> error.to_string(other)
   }
 }

@@ -1,9 +1,13 @@
 //// Current Anthropic Claude models.
 ////
 //// These models choose their own sampling: the API rejects `temperature`,
-//// `top_p` and `top_k`, so this builder doesn't offer them. Thinking is
-//// adaptive; set its depth with `reasoning_effort` (sent as
-//// `output_config.effort`).
+//// `top_p` and `top_k`, so this builder doesn't offer them.
+////
+//// Thinking is adaptive: the model decides how much to think, and
+//// `reasoning_effort` (sent as `output_config.effort`) sets how deep it
+//// goes. The Claude 5 models think without being asked. Opus 4.7 and 4.8
+//// only think when `reasoning_effort` or `show_reasoning` is set. No model
+//// returns the text of its thinking unless `show_reasoning` asks for it.
 ////
 //// For older Claude models that still take sampling parameters, see
 //// `glean/models/anthropic_sampling`.
@@ -24,7 +28,13 @@ pub opaque type Claude {
 // Constructors
 // ---------------------------------------------------------------------------
 
-/// Claude Fable 5.1, the most capable widely released Claude model. Rejects forced tool choice. Model ID: `claude-fable-5-1`.
+/// Claude Fable 5.2, the most capable generally available Claude model.
+/// Rejects forced tool choice. Model ID: `claude-fable-5-2`.
+pub fn fable_5_2(api_key key: String) -> Claude {
+  new(key, "claude-fable-5-2")
+}
+
+/// Claude Fable 5.1. Rejects forced tool choice. Model ID: `claude-fable-5-1`.
 pub fn fable_5_1(api_key key: String) -> Claude {
   new(key, "claude-fable-5-1")
 }
@@ -110,6 +120,23 @@ pub fn reasoning_effort(m: Claude, effort: ReasoningEffort) -> Claude {
     ..m,
     settings: ModelSettings(..m.settings, reasoning_effort: Some(effort)),
   )
+}
+
+/// Ask for the model's reasoning as text: a summary of its thinking, in
+/// the result's reasoning content and the stream's reasoning events.
+/// Without this Claude thinks but the reasoning text comes back empty.
+pub fn show_reasoning(m: Claude) -> Claude {
+  Claude(..m, settings: ModelSettings(..m.settings, include_reasoning: True))
+}
+
+/// Cache the prompt: the tools, the system prompt and the conversation so
+/// far are read from Claude's cache on the next call at a fraction of the
+/// input price, for a little more on the call that writes them. Worth it
+/// for agents that take several steps or share a long system prompt. The
+/// cached amounts are in `Usage.cache_read_tokens` and
+/// `Usage.cache_write_tokens`.
+pub fn prompt_caching(m: Claude) -> Claude {
+  Claude(..m, config: config.prompt_caching(m.config, True))
 }
 
 // ---------------------------------------------------------------------------

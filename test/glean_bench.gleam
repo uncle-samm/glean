@@ -32,11 +32,11 @@ pub fn main() -> Nil {
     let request = history_request(n)
     let cfg = config.new(api_key: "k", model: "m")
     bench("openai encode " <> int.to_string(n) <> " messages", 200, fn() {
-      openai_compatible.encode_request(cfg, request, False)
+      let _ = openai_compatible.encode_request(cfg, request, False)
       Nil
     })
     bench("anthropic encode " <> int.to_string(n) <> " messages", 200, fn() {
-      let _ = anthropic.encode_request("m", request, False)
+      let _ = anthropic.encode_request(cfg, request, False)
       Nil
     })
   })

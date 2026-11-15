@@ -1,5 +1,18 @@
-/// Google Gemini provider (gemini-2.5-pro, gemini-2.5-flash, etc.)
-/// Uses the Gemini REST API format (different from OpenAI).
+//// Google Gemini provider, on the Gemini REST API.
+////
+//// What glean's settings become on the wire:
+////
+//// - `tool_choice` is sent as `toolConfig.functionCallingConfig`.
+//// - `reasoning_effort` is sent as `thinkingConfig.thinkingLevel`, which
+////   Gemini 3 and later models take. Gemini has no level above `high`, so
+////   `XHighEffort` and `MaxEffort` send `high`. Gemini 2.5 models take a
+////   token budget instead: leave `reasoning_effort` unset for them.
+//// - `include_reasoning` asks for thought summaries
+////   (`thinkingConfig.includeThoughts`); without it Gemini thinks but
+////   returns no reasoning text.
+//// - Files the model makes (images from the image models) come back as
+////   `GeneratedFile` and are sent back on the next turn.
+
 import gleam/dynamic/decode
 import gleam/int
 import gleam/json
@@ -13,13 +26,15 @@ import glean/json_value
 import glean/message.{type Message}
 import glean/provider.{
   type GenerateRequest, type GenerateResult, type GeneratedContent,
-  type Provider, GenerateResult, GeneratedText, GeneratedToolCall, Provider,
+  type Provider, GenerateResult, GeneratedFile, GeneratedReasoning,
+  GeneratedRedactedReasoning, GeneratedText, GeneratedToolCall, Provider,
 }
 import glean/providers/config.{type ProviderConfig}
 import glean/providers/http_utils
 import glean/providers/sse
 import glean/schema
-import glean/stream.{type StreamEvent, type Usage, Usage}
+import glean/stream.{type StreamEvent}
+import glean/usage.{type Usage, Usage}
 
 const base_url = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -65,7 +80,7 @@ fn do_generate(
   config: ProviderConfig,
   gen_request: GenerateRequest,
 ) -> Result(GenerateResult, GleanError) {
-  let body = encode_request(gen_request)
+  let body = encode_request(config, gen_request)
   let url = config.base_url <> "/models/" <> config.model <> ":generateContent"
 
   case make_http_request(config, url, body) {
@@ -76,10 +91,14 @@ fn do_generate(
 
 // --- Streaming ---
 
-type GeminiStreamAccumulator {
-  GeminiStreamAccumulator(
-    text: string_tree.StringTree,
-    tool_calls: List(GeminiStreamToolCall),
+type StreamState {
+  StreamState(
+    /// The parts that have ended, newest first.
+    content: List(GeneratedContent),
+    /// The text or reasoning part still receiving deltas.
+    open: OpenPart,
+    /// Numbers the parts, so every part's events carry their own id.
+    next_part: Int,
     finish_reason: FinishReason,
     usage: Usage,
     /// True once a chunk carrying a finishReason has been seen.
@@ -87,8 +106,10 @@ type GeminiStreamAccumulator {
   )
 }
 
-type GeminiStreamToolCall {
-  GeminiStreamToolCall(id: String, name: String, args_json: String)
+type OpenPart {
+  NothingOpen
+  TextOpen(id: String, text: string_tree.StringTree)
+  ReasoningOpen(id: String, text: string_tree.StringTree)
 }
 
 fn do_stream(
@@ -96,7 +117,7 @@ fn do_stream(
   gen_request: GenerateRequest,
   on_event: fn(StreamEvent) -> Nil,
 ) -> Result(GenerateResult, GleanError) {
-  let body = encode_request(gen_request)
+  let body = encode_request(config, gen_request)
   let url =
     config.base_url
     <> "/models/"
@@ -105,49 +126,48 @@ fn do_stream(
 
   // The API key goes in a header, never the URL, so it can't leak into
   // logs, proxies, or error messages.
-  let headers = [
-    #("x-goog-api-key", config.api_key),
-    ..list.map(config.headers, fn(h) { #(h.0, h.1) })
-  ]
+  let headers = [#("x-goog-api-key", config.api_key), ..config.headers]
 
-  let events = sse.start(config, url, headers, body)
-  let acc =
-    GeminiStreamAccumulator(
-      text: string_tree.new(),
-      tool_calls: [],
+  sse.start(config, url, headers, body)
+  |> stream_events(on_event, config.model, config.timeout_ms)
+}
+
+/// Read a Gemini stream to its end: emit its events and build the result.
+///
+/// Every text and reasoning part gets a start event, its deltas and an end
+/// event, all with the part's own id. Reasoning is part of the result's
+/// content, as it is without streaming.
+@internal
+pub fn stream_events(
+  events: sse.Stream,
+  on_event: fn(StreamEvent) -> Nil,
+  model: String,
+  timeout_ms: Int,
+) -> Result(GenerateResult, GleanError) {
+  let state =
+    StreamState(
+      content: [],
+      open: NothingOpen,
+      next_part: 0,
       finish_reason: error.Stop,
-      usage: stream.zero_usage(),
+      usage: usage.zero(),
       finished: False,
     )
-
-  use final_acc <- result.try(gemini_stream_loop(
+  use state <- result.map(gemini_stream_loop(
     events,
-    acc,
+    state,
     on_event,
-    config.model,
-    config.timeout_ms,
+    model,
+    timeout_ms,
   ))
-
-  let text_content = case string_tree.to_string(final_acc.text) {
-    "" -> []
-    t -> [GeneratedText(text: t)]
-  }
-
-  let tool_content =
-    list.map(final_acc.tool_calls, fn(tc) {
-      GeneratedToolCall(
-        tool_call_id: tc.id,
-        tool_name: tc.name,
-        arguments_json: tc.args_json,
-      )
-    })
-
-  Ok(GenerateResult(
-    content: list.append(text_content, tool_content),
-    finish_reason: final_acc.finish_reason,
-    usage: final_acc.usage,
-    model_id: config.model,
-  ))
+  // A chunk with a finishReason closes the open part, so nothing is open.
+  let assert NothingOpen = state.open
+  GenerateResult(
+    content: list.reverse(state.content),
+    finish_reason: state.finish_reason,
+    usage: state.usage,
+    model_id: model,
+  )
 }
 
 /// Receive SSE events until the stream closes.
@@ -158,11 +178,11 @@ fn do_stream(
 /// errors.
 fn gemini_stream_loop(
   events: sse.Stream,
-  acc: GeminiStreamAccumulator,
+  state: StreamState,
   on_event: fn(StreamEvent) -> Nil,
   model: String,
   timeout_ms: Int,
-) -> Result(GeminiStreamAccumulator, GleanError) {
+) -> Result(StreamState, GleanError) {
   let fail = fn(status, message) {
     Error(error.ProviderError(
       provider: "gemini",
@@ -174,8 +194,8 @@ fn gemini_stream_loop(
   case sse.next(events, timeout_ms) {
     Error(Nil) -> Error(error.Timeout(after_ms: timeout_ms))
     Ok(#(sse.Closed, _)) ->
-      case acc.finished {
-        True -> Ok(acc)
+      case state.finished {
+        True -> Ok(state)
         False -> fail(0, "Stream closed before the response finished")
       }
     Ok(#(sse.HttpStatus(status, body), _)) -> fail(status, body)
@@ -189,7 +209,7 @@ fn gemini_stream_loop(
         Error(_) ->
           gemini_stream_loop(
             events,
-            process_gemini_chunk(acc, data, on_event),
+            process_gemini_chunk(state, data, on_event),
             on_event,
             model,
             timeout_ms,
@@ -212,133 +232,133 @@ fn stream_error_decoder() -> decode.Decoder(String) {
 }
 
 fn process_gemini_chunk(
-  acc: GeminiStreamAccumulator,
+  state: StreamState,
   data: String,
   on_event: fn(StreamEvent) -> Nil,
-) -> GeminiStreamAccumulator {
-  let decoder = gemini_chunk_decoder()
-  case json.parse(data, decoder) {
-    Error(_) -> acc
+) -> StreamState {
+  case json.parse(data, response_decoder()) {
+    // A chunk that isn't a response (a keep-alive, say) carries nothing.
+    Error(_) -> state
     Ok(chunk) -> {
-      // Process each content piece from this chunk
-      let acc =
-        list.fold(chunk.content, acc, fn(a, content) {
-          case content {
-            GeneratedText(text: text) -> {
-              on_event(stream.TextDelta(id: "gemini", delta: text))
-              GeminiStreamAccumulator(
-                ..a,
-                text: string_tree.append(a.text, text),
-              )
-            }
-            provider.GeneratedReasoning(text: text, ..) -> {
-              on_event(stream.ReasoningDelta(id: "gemini", delta: text))
-              a
-            }
-            provider.GeneratedRedactedReasoning(..) -> a
-            GeneratedToolCall(
-              tool_call_id: id,
-              tool_name: name,
-              arguments_json: args,
-            ) -> {
-              on_event(stream.ToolCallStart(
-                id: "gemini",
-                tool_call_id: id,
-                tool_name: name,
-              ))
-              on_event(stream.ToolCallDelta(
-                id: "gemini",
-                tool_call_id: id,
-                delta: args,
-              ))
-              on_event(stream.ToolCallEnd(id: "gemini", tool_call_id: id))
-              GeminiStreamAccumulator(
-                ..a,
-                tool_calls: list.append(a.tool_calls, [
-                  GeminiStreamToolCall(id: id, name: name, args_json: args),
-                ]),
-              )
-            }
-          }
+      let state =
+        list.fold(chunk.content, state, fn(state, part) {
+          stream_part(state, part, on_event)
         })
 
-      // Update finish reason if present in this chunk
-      let acc = case chunk.finish_reason {
-        "" -> acc
-        fr ->
-          GeminiStreamAccumulator(
-            ..acc,
-            finish_reason: parse_gemini_finish_reason(fr),
+      let state = case chunk.finish_reason {
+        None -> state
+        Some(reason) ->
+          StreamState(
+            ..close_open_part(state, on_event),
+            finish_reason: reason,
             finished: True,
           )
       }
 
-      // Update usage if present in this chunk
-      case chunk.usage {
-        Usage(input_tokens: 0, output_tokens: 0) -> acc
-        u -> GeminiStreamAccumulator(..acc, usage: u)
+      // Each chunk's usage is the running total, so the last one wins.
+      case chunk.usage == usage.zero() {
+        True -> state
+        False -> StreamState(..state, usage: chunk.usage)
       }
     }
   }
 }
 
-type GeminiChunk {
-  GeminiChunk(
-    content: List(GeneratedContent),
-    finish_reason: String,
-    usage: Usage,
+/// Add one part of a chunk to the stream: a delta for the open part when
+/// it is more of the same kind, otherwise the end of that part and the
+/// start of a new one.
+fn stream_part(
+  state: StreamState,
+  part: GeneratedContent,
+  on_event: fn(StreamEvent) -> Nil,
+) -> StreamState {
+  case part, state.open {
+    GeneratedText(text: ""), _ | GeneratedReasoning(text: "", ..), _ -> state
+    GeneratedText(text:), TextOpen(id:, text: so_far) -> {
+      on_event(stream.TextDelta(id: id, delta: text))
+      StreamState(
+        ..state,
+        open: TextOpen(id: id, text: string_tree.append(so_far, text)),
+      )
+    }
+    GeneratedReasoning(text:, ..), ReasoningOpen(id:, text: so_far) -> {
+      on_event(stream.ReasoningDelta(id: id, delta: text))
+      StreamState(
+        ..state,
+        open: ReasoningOpen(id: id, text: string_tree.append(so_far, text)),
+      )
+    }
+    GeneratedText(text:), _ -> {
+      let #(state, id) = next_part_id(close_open_part(state, on_event))
+      on_event(stream.TextStart(id: id))
+      on_event(stream.TextDelta(id: id, delta: text))
+      StreamState(
+        ..state,
+        open: TextOpen(id: id, text: string_tree.from_string(text)),
+      )
+    }
+    GeneratedReasoning(text:, ..), _ -> {
+      let #(state, id) = next_part_id(close_open_part(state, on_event))
+      on_event(stream.ReasoningStart(id: id))
+      on_event(stream.ReasoningDelta(id: id, delta: text))
+      StreamState(
+        ..state,
+        open: ReasoningOpen(id: id, text: string_tree.from_string(text)),
+      )
+    }
+    GeneratedToolCall(tool_call_id:, tool_name:, arguments_json:), _ -> {
+      // Gemini sends a function call whole, never in pieces.
+      let #(state, id) = next_part_id(close_open_part(state, on_event))
+      on_event(stream.ToolCallStart(
+        id: id,
+        tool_call_id: tool_call_id,
+        tool_name: tool_name,
+      ))
+      on_event(stream.ToolCallDelta(
+        id: id,
+        tool_call_id: tool_call_id,
+        delta: arguments_json,
+      ))
+      on_event(stream.ToolCallEnd(id: id, tool_call_id: tool_call_id))
+      StreamState(..state, content: [part, ..state.content])
+    }
+    GeneratedFile(..), _ | GeneratedRedactedReasoning(..), _ -> {
+      // No stream event carries a file; it is in the result's content.
+      let state = close_open_part(state, on_event)
+      StreamState(..state, content: [part, ..state.content])
+    }
+  }
+}
+
+fn next_part_id(state: StreamState) -> #(StreamState, String) {
+  #(
+    StreamState(..state, next_part: state.next_part + 1),
+    "gemini-" <> int.to_string(state.next_part),
   )
 }
 
-fn gemini_chunk_decoder() -> decode.Decoder(GeminiChunk) {
-  let candidate_decoder = {
-    use content <- decode.optional_field("content", [], {
-      use parts <- decode.optional_field(
-        "parts",
-        [],
-        decode.list(part_decoder()),
-      )
-      decode.success(option.values(parts))
-    })
-    use finish_reason <- decode.optional_field(
-      "finishReason",
-      "",
-      decode.string,
-    )
-    decode.success(#(content, finish_reason))
+/// End the open text or reasoning part and move it into the content.
+fn close_open_part(
+  state: StreamState,
+  on_event: fn(StreamEvent) -> Nil,
+) -> StreamState {
+  case state.open {
+    NothingOpen -> state
+    TextOpen(id:, text:) -> {
+      on_event(stream.TextEnd(id: id))
+      StreamState(..state, open: NothingOpen, content: [
+        GeneratedText(text: string_tree.to_string(text)),
+        ..state.content
+      ])
+    }
+    ReasoningOpen(id:, text:) -> {
+      on_event(stream.ReasoningEnd(id: id))
+      StreamState(..state, open: NothingOpen, content: [
+        GeneratedReasoning(text: string_tree.to_string(text), signature: None),
+        ..state.content
+      ])
+    }
   }
-
-  let usage_decoder = {
-    use prompt <- decode.optional_field("promptTokenCount", 0, decode.int)
-    use candidates <- decode.optional_field(
-      "candidatesTokenCount",
-      0,
-      decode.int,
-    )
-    decode.success(Usage(input_tokens: prompt, output_tokens: candidates))
-  }
-
-  use candidates <- decode.optional_field(
-    "candidates",
-    [],
-    decode.list(candidate_decoder),
-  )
-  use usage <- decode.optional_field(
-    "usageMetadata",
-    Usage(input_tokens: 0, output_tokens: 0),
-    usage_decoder,
-  )
-
-  let #(content, finish_reason) = case candidates {
-    [#(parts, fr), ..] -> #(parts, fr)
-    [] -> #([], "")
-  }
-
-  decode.success(GeminiChunk(
-    content: content,
-    finish_reason: finish_reason,
-    usage: usage,
-  ))
 }
 
 // --- HTTP ---
@@ -355,7 +375,12 @@ fn make_http_request(
 
 // --- Request encoding (Gemini format) ---
 
-fn encode_request(gen_request: GenerateRequest) -> String {
+/// The JSON body of a `generateContent` or `streamGenerateContent` call.
+@internal
+pub fn encode_request(
+  config: ProviderConfig,
+  gen_request: GenerateRequest,
+) -> String {
   let #(system_parts, conversation) = split_system(gen_request.messages)
   let contents = encode_contents(conversation)
 
@@ -382,75 +407,58 @@ fn encode_request(gen_request: GenerateRequest) -> String {
     }
   }
 
-  // Tools
+  // Tools, and how the model may choose among them
   let fields = case gen_request.tools {
     [] -> fields
-    tools ->
-      list.append(fields, [
-        #(
-          "tools",
-          json.preprocessed_array([
-            json.object([
-              #(
-                "functionDeclarations",
-                json.preprocessed_array(encode_tools(tools)),
-              ),
-            ]),
-          ]),
-        ),
-      ])
+    tools -> {
+      let declarations =
+        json.object([
+          #(
+            "functionDeclarations",
+            json.preprocessed_array(encode_tools(tools)),
+          ),
+        ])
+      let fields =
+        list.append(fields, [
+          #("tools", json.preprocessed_array([declarations])),
+        ])
+      case encode_function_calling_config(gen_request.tool_choice) {
+        None -> fields
+        Some(calling) ->
+          list.append(fields, [
+            #("toolConfig", json.object([#("functionCallingConfig", calling)])),
+          ])
+      }
+    }
   }
 
-  // Generation config
-  let gen_config_fields = []
-
-  let gen_config_fields = case gen_request.settings.max_output_tokens {
-    None -> gen_config_fields
-    Some(max) ->
-      list.append(gen_config_fields, [#("maxOutputTokens", json.int(max))])
+  let settings = gen_request.settings
+  let format_fields = case gen_request.response_format {
+    provider.TextFormat -> []
+    provider.JsonFormat(schema: None, ..) -> [
+      #("responseMimeType", json.string("application/json")),
+    ]
+    provider.JsonFormat(schema: Some(output_schema), ..) -> [
+      #("responseMimeType", json.string("application/json")),
+      #("responseJsonSchema", schema.to_json(output_schema)),
+    ]
   }
-
-  let gen_config_fields = case gen_request.settings.temperature {
-    None -> gen_config_fields
-    Some(temp) ->
-      list.append(gen_config_fields, [#("temperature", json.float(temp))])
-  }
-
-  let gen_config_fields = case gen_request.settings.top_p {
-    None -> gen_config_fields
-    Some(p) -> list.append(gen_config_fields, [#("topP", json.float(p))])
-  }
-
-  let gen_config_fields = case gen_request.settings.top_k {
-    None -> gen_config_fields
-    Some(k) -> list.append(gen_config_fields, [#("topK", json.int(k))])
-  }
-
-  let gen_config_fields = case gen_request.settings.stop_sequences {
-    None -> gen_config_fields
-    Some(stops) ->
-      list.append(gen_config_fields, [
-        #("stopSequences", json.array(stops, json.string)),
-      ])
-  }
-
-  let gen_config_fields = case gen_request.settings.seed {
-    None -> gen_config_fields
-    Some(seed) -> list.append(gen_config_fields, [#("seed", json.int(seed))])
-  }
-
-  let gen_config_fields = case gen_request.response_format {
-    provider.TextFormat -> gen_config_fields
-    provider.JsonFormat(schema: None, ..) ->
-      list.append(gen_config_fields, [
-        #("responseMimeType", json.string("application/json")),
-      ])
-    provider.JsonFormat(schema: Some(output_schema), ..) ->
-      list.append(gen_config_fields, [
-        #("responseMimeType", json.string("application/json")),
-        #("responseJsonSchema", schema.to_json(output_schema)),
-      ])
-  }
+  let gen_config_fields =
+    list.flatten([
+      optional("maxOutputTokens", settings.max_output_tokens, json.int),
+      optional("temperature", settings.temperature, json.float),
+      optional("topP", settings.top_p, json.float),
+      optional("topK", settings.top_k, json.int),
+      optional("stopSequences", settings.stop_sequences, json.array(
+        _,
+        json.string,
+      )),
+      optional("seed", settings.seed, json.int),
+      optional("presencePenalty", settings.presence_penalty, json.float),
+      optional("frequencyPenalty", settings.frequency_penalty, json.float),
+      optional("thinkingConfig", encode_thinking_config(settings), fn(c) { c }),
+      format_fields,
+    ])
 
   let fields = case gen_config_fields {
     [] -> fields
@@ -460,8 +468,64 @@ fn encode_request(gen_request: GenerateRequest) -> String {
       ])
   }
 
-  json.object(fields)
+  config.with_extra_body(fields, config)
+  |> json.object
   |> json.to_string
+}
+
+/// A field that is only sent when it has a value.
+fn optional(
+  name: String,
+  value: Option(a),
+  encode: fn(a) -> json.Json,
+) -> List(#(String, json.Json)) {
+  case value {
+    None -> []
+    Some(value) -> [#(name, encode(value))]
+  }
+}
+
+/// `Auto` is Gemini's default, so nothing is sent for it.
+fn encode_function_calling_config(
+  choice: provider.ToolChoice,
+) -> Option(json.Json) {
+  case choice {
+    provider.Auto -> None
+    provider.Required -> Some(json.object([#("mode", json.string("ANY"))]))
+    provider.NoTools -> Some(json.object([#("mode", json.string("NONE"))]))
+    provider.SpecificTool(name:) ->
+      Some(
+        json.object([
+          #("mode", json.string("ANY")),
+          #("allowedFunctionNames", json.array([name], json.string)),
+        ]),
+      )
+  }
+}
+
+fn encode_thinking_config(
+  settings: provider.ModelSettings,
+) -> Option(json.Json) {
+  let level = case settings.reasoning_effort {
+    None -> []
+    Some(effort) -> {
+      let level = case effort {
+        provider.LowEffort -> "low"
+        provider.MediumEffort -> "medium"
+        provider.HighEffort | provider.XHighEffort | provider.MaxEffort ->
+          "high"
+      }
+      [#("thinkingLevel", json.string(level))]
+    }
+  }
+  let thoughts = case settings.include_reasoning {
+    False -> []
+    True -> [#("includeThoughts", json.bool(True))]
+  }
+  case list.append(level, thoughts) {
+    [] -> None
+    fields -> Some(json.object(fields))
+  }
 }
 
 fn split_system(messages: List(Message)) -> #(List(String), List(Message)) {
@@ -497,15 +561,18 @@ fn encode_content(msg: Message) -> List(json.Json) {
         #("parts", json.preprocessed_array(list.map(content, encode_user_part))),
       ]),
     ]
-    message.AssistantMessage(content) -> [
-      json.object([
-        #("role", json.string("model")),
-        #(
-          "parts",
-          json.preprocessed_array(list.filter_map(content, encode_model_part)),
-        ),
-      ]),
-    ]
+    message.AssistantMessage(content) ->
+      // A turn with nothing Gemini can read (only another provider's
+      // encrypted reasoning, say) is left out: Gemini rejects empty parts.
+      case list.filter_map(content, encode_model_part) {
+        [] -> []
+        parts -> [
+          json.object([
+            #("role", json.string("model")),
+            #("parts", json.preprocessed_array(parts)),
+          ]),
+        ]
+      }
     message.ToolResultMessage(results) -> [
       json.object([
         #("role", json.string("user")),
@@ -549,7 +616,8 @@ fn encode_user_part(content: message.UserContent) -> json.Json {
 
 /// Reasoning goes back marked as a thought so it isn't mistaken for the
 /// answer. Encrypted reasoning from other providers has no Gemini form and
-/// is left out.
+/// is left out. A file the model made goes back as it came, with its
+/// thought signature.
 fn encode_model_part(
   content: message.AssistantContent,
 ) -> Result(json.Json, Nil) {
@@ -564,6 +632,22 @@ fn encode_model_part(
         ]),
       )
     message.AssistantRedactedReasoning(_) -> Error(Nil)
+    message.AssistantFile(media_type:, data:, signature:) -> {
+      let inline_data =
+        json.object([
+          #("mimeType", json.string(media_type)),
+          #("data", json.string(data)),
+        ])
+      Ok(
+        json.object(case signature {
+          None -> [#("inlineData", inline_data)]
+          Some(signature) -> [
+            #("inlineData", inline_data),
+            #("thoughtSignature", json.string(signature)),
+          ]
+        }),
+      )
+    }
     message.AssistantToolCall(id, name, args_json) -> {
       let args = json_value.arguments_to_object(args_json)
       let fc =
@@ -624,12 +708,13 @@ fn encode_tools(tools: List(provider.ToolSpec)) -> List(json.Json) {
 
 // --- Response decoding (Gemini format) ---
 
-fn decode_response(
+/// Decode the body of a `generateContent` response.
+@internal
+pub fn decode_response(
   model_id: String,
   body: String,
 ) -> Result(GenerateResult, GleanError) {
-  let decoder = gemini_response_decoder()
-  case json.parse(body, decoder) {
+  case json.parse(body, response_decoder()) {
     Error(_) ->
       Error(error.JsonParseError(
         input: body,
@@ -637,33 +722,35 @@ fn decode_response(
       ))
     Ok(parsed) ->
       Ok(GenerateResult(
-        content: parsed.content,
-        finish_reason: parsed.finish_reason,
+        content: list.filter(parsed.content, fn(part) {
+          part != GeneratedText(text: "")
+        }),
+        finish_reason: case parsed.finish_reason, parsed.blocked {
+          Some(reason), _ -> reason
+          // A prompt blocked by safety filters comes back with no
+          // candidates.
+          None, True -> error.ContentFilter
+          None, False -> error.Stop
+        },
         usage: parsed.usage,
         model_id: model_id,
       ))
   }
 }
 
+/// A whole response, or one chunk of a streamed one.
 type ParsedResponse {
   ParsedResponse(
     content: List(GeneratedContent),
-    finish_reason: FinishReason,
+    /// None in the stream chunks before the last.
+    finish_reason: Option(FinishReason),
+    /// True when the response has no candidate at all.
+    blocked: Bool,
     usage: Usage,
   )
 }
 
-fn gemini_response_decoder() -> decode.Decoder(ParsedResponse) {
-  let usage_decoder = {
-    use prompt <- decode.optional_field("promptTokenCount", 0, decode.int)
-    use candidates <- decode.optional_field(
-      "candidatesTokenCount",
-      0,
-      decode.int,
-    )
-    decode.success(Usage(input_tokens: prompt, output_tokens: candidates))
-  }
-
+fn response_decoder() -> decode.Decoder(ParsedResponse) {
   let candidate_decoder = {
     use content <- decode.optional_field("content", [], {
       use parts <- decode.optional_field(
@@ -675,13 +762,12 @@ fn gemini_response_decoder() -> decode.Decoder(ParsedResponse) {
     })
     use finish_reason <- decode.optional_field(
       "finishReason",
-      "STOP",
-      decode.string,
+      None,
+      decode.map(decode.string, Some),
     )
     decode.success(#(content, finish_reason))
   }
 
-  // A prompt blocked by safety filters comes back with no candidates.
   use candidates <- decode.optional_field(
     "candidates",
     [],
@@ -689,34 +775,57 @@ fn gemini_response_decoder() -> decode.Decoder(ParsedResponse) {
   )
   use usage <- decode.optional_field(
     "usageMetadata",
-    Usage(input_tokens: 0, output_tokens: 0),
-    usage_decoder,
+    usage.zero(),
+    usage_decoder(),
   )
 
-  let #(content, finish_reason) = case candidates {
-    [#(parts, fr), ..] -> #(parts, parse_gemini_finish_reason(fr))
-    [] -> #([], error.ContentFilter)
-  }
+  decode.success(case candidates {
+    [#(parts, reason), ..] ->
+      ParsedResponse(
+        content: parts,
+        finish_reason: option.map(reason, parse_gemini_finish_reason),
+        blocked: False,
+        usage: usage,
+      )
+    [] ->
+      ParsedResponse(
+        content: [],
+        finish_reason: None,
+        blocked: True,
+        usage: usage,
+      )
+  })
+}
 
-  decode.success(ParsedResponse(
-    content: content,
-    finish_reason: finish_reason,
-    usage: usage,
+/// Gemini counts thinking apart from the answer and counts cached input
+/// inside the prompt; glean's totals include both.
+fn usage_decoder() -> decode.Decoder(Usage) {
+  use prompt <- decode.optional_field("promptTokenCount", 0, decode.int)
+  use candidates <- decode.optional_field("candidatesTokenCount", 0, decode.int)
+  use thoughts <- decode.optional_field("thoughtsTokenCount", 0, decode.int)
+  use cached <- decode.optional_field("cachedContentTokenCount", 0, decode.int)
+  decode.success(Usage(
+    input_tokens: prompt,
+    output_tokens: candidates + thoughts,
+    cache_read_tokens: cached,
+    cache_write_tokens: 0,
+    reasoning_tokens: thoughts,
   ))
 }
 
-/// Decodes one response part. Thought parts become reasoning; part types
-/// glean doesn't use (inline images, code execution) decode to None instead
-/// of failing the whole response.
+/// Decodes one response part. Thought parts become reasoning and inline
+/// data becomes a file; part types glean doesn't use (code execution)
+/// decode to None instead of failing the whole response.
 fn part_decoder() -> decode.Decoder(Option(GeneratedContent)) {
-  use function_call <- decode.optional_field(
-    "functionCall",
-    None,
-    decode.map(decode.dynamic, Some),
-  )
-  case function_call {
-    Some(_) -> decode.map(function_call_part_decoder(), Some)
-    None -> {
+  let present = fn(name, next) {
+    decode.optional_field(name, False, decode.success(True), next)
+  }
+  use is_function_call <- present("functionCall")
+  use is_inline_data <- present("inlineData")
+  case is_function_call, is_inline_data {
+    True, _ -> decode.map(function_call_part_decoder(), Some)
+    False, True -> decode.map(inline_data_part_decoder(), Some)
+    False, False -> {
       use text <- decode.optional_field(
         "text",
         None,
@@ -725,14 +834,30 @@ fn part_decoder() -> decode.Decoder(Option(GeneratedContent)) {
       use thought <- decode.optional_field("thought", False, decode.bool)
       case text, thought {
         Some(t), True ->
-          decode.success(
-            Some(provider.GeneratedReasoning(text: t, signature: None)),
-          )
+          decode.success(Some(GeneratedReasoning(text: t, signature: None)))
         Some(t), False -> decode.success(Some(GeneratedText(text: t)))
         None, _ -> decode.success(None)
       }
     }
   }
+}
+
+fn inline_data_part_decoder() -> decode.Decoder(GeneratedContent) {
+  use #(media_type, data) <- decode.field("inlineData", {
+    use media_type <- decode.field("mimeType", decode.string)
+    use data <- decode.field("data", decode.string)
+    decode.success(#(media_type, data))
+  })
+  use signature <- decode.optional_field(
+    "thoughtSignature",
+    None,
+    decode.map(decode.string, Some),
+  )
+  decode.success(GeneratedFile(
+    media_type: media_type,
+    data: data,
+    signature: signature,
+  ))
 }
 
 fn function_call_part_decoder() -> decode.Decoder(GeneratedContent) {
@@ -768,8 +893,15 @@ fn parse_gemini_finish_reason(reason: String) -> FinishReason {
   case reason {
     "STOP" -> error.Stop
     "MAX_TOKENS" -> error.Length
-    "SAFETY" -> error.ContentFilter
-    "RECITATION" -> error.ContentFilter
+    "SAFETY"
+    | "RECITATION"
+    | "BLOCKLIST"
+    | "PROHIBITED_CONTENT"
+    | "SPII"
+    | "IMAGE_SAFETY"
+    | "IMAGE_PROHIBITED_CONTENT" -> error.ContentFilter
+    // The model wrote a function call Gemini could not read or run.
+    "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" -> error.FinishError
     other -> error.Other(other)
   }
 }
